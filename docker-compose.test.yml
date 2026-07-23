@@ -1,0 +1,46 @@
+services:
+  db-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: movie_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-test:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db-test:5432/movie_test
+      DATABASE_URL_SYNC: postgresql+psycopg2://postgres:postgres@db-test:5432/movie_test
+      REDIS_URL: redis://redis-test:6379/0
+      ENVIRONMENT: test
+    depends_on:
+      db-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    command: >
+      sh -c "
+        pip install -r requirements-dev.txt &&
+        pip install aiosqlite &&
+        pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=xml
+      "
+    volumes:
+      - .:/app
+      - ./coverage.xml:/app/coverage.xml
