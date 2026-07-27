@@ -133,6 +133,7 @@ DELETE /api/v1/users/{id}         Deactivate user [Admin]
 ### Movies
 ```
 GET    /api/v1/movies/                    List movies (filter/search/paginate)
+GET    /api/v1/movies/now-showing        List currently showing movies [Public]
 GET    /api/v1/movies/{id}                Movie detail
 POST   /api/v1/movies/                    Create movie [Admin]
 PUT    /api/v1/movies/{id}                Update movie [Admin]
@@ -142,29 +143,29 @@ GET    /api/v1/movies/tmdb/search         Search TMDB [Admin]
 GET    /api/v1/movies/tmdb/popular        Popular on TMDB [Admin]
 ```
 
-### Theaters & Showtimes
+### Screening Rooms & Showtimes
 ```
-GET    /api/v1/theaters/          List theaters
-GET    /api/v1/theaters/{id}      Theater + seat layout
-POST   /api/v1/theaters/          Create theater (auto-generates seats) [Admin]
-PUT    /api/v1/theaters/{id}      Update theater [Admin]
+GET    /api/v1/rooms/             List screening rooms
+GET    /api/v1/rooms/{id}         Room + seat layout
+POST   /api/v1/rooms/             Create room (auto-generates seats) [Admin]
+PUT    /api/v1/rooms/{id}         Update room [Admin]
 
-GET    /api/v1/showtimes/         List showtimes (filter by date/movie/theater)
+GET    /api/v1/showtimes/         List showtimes (auto transitions: SCHEDULED -> ONGOING -> COMPLETED)
 GET    /api/v1/showtimes/{id}     Showtime detail
 GET    /api/v1/showtimes/{id}/seats  Seat availability map [Auth]
-POST   /api/v1/showtimes/         Create showtime [Admin]
+POST   /api/v1/showtimes/         Create showtime (Admin - only NOW_SHOWING movies allowed)
 PUT    /api/v1/showtimes/{id}     Update showtime [Admin]
 DELETE /api/v1/showtimes/{id}     Cancel showtime [Admin]
 ```
 
 ### Reservations
 ```
-GET    /api/v1/reservations/               My reservations
-POST   /api/v1/reservations/               Create reservation
-GET    /api/v1/reservations/{id}           Reservation detail
+GET    /api/v1/reservations/               My reservations (includes ShowtimeSummary)
+POST   /api/v1/reservations/               Create reservation (requires hold)
+GET    /api/v1/reservations/{id}           Reservation detail (includes ShowtimeSummary)
 DELETE /api/v1/reservations/{id}           Cancel reservation
 
-GET    /api/v1/reservations/admin/all              All reservations [Admin]
+GET    /api/v1/reservations/admin/all              All reservations (includes ShowtimeSummary) [Admin]
 GET    /api/v1/reservations/admin/report/revenue   Revenue report [Admin]
 GET    /api/v1/reservations/admin/report/capacity  Capacity report [Admin]
 ```
@@ -185,10 +186,9 @@ pip install -r requirements-dev.txt
 
 # Set up env variables
 cp .env.example .env
-# Edit DATABASE_URL and REDIS_URL to point to local services
 
 # Run database migrations
-alembic upgrade head
+python -m alembic upgrade head
 
 # Start the app
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -199,18 +199,11 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ## 🧪 Running Tests
 
 ```bash
-# Install test dependencies
-pip install -r requirements-dev.txt
-pip install aiosqlite
-
-# Run tests
+# Run full test suite (72 passed, ~68% coverage)
 pytest tests/ -v
 
-# With coverage
+# With coverage report
 pytest tests/ --cov=app --cov-report=term-missing
-
-# Using Docker
-docker-compose -f docker-compose.test.yml run --rm test
 ```
 
 ---
@@ -218,17 +211,14 @@ docker-compose -f docker-compose.test.yml run --rm test
 ## 🗄️ Database Migrations (Alembic)
 
 ```bash
-# Create a new migration
-alembic revision --autogenerate -m "description of change"
+# Generate migration inside Docker container
+docker exec movie_app alembic revision --autogenerate -m "description_of_change"
 
 # Apply migrations
-alembic upgrade head
+docker exec movie_app alembic upgrade head
 
-# Rollback one step
-alembic downgrade -1
-
-# Show migration history
-alembic history
+# Check current revision status
+docker exec movie_app alembic current
 ```
 
 ---

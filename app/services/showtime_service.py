@@ -39,6 +39,36 @@ class ShowtimeService:
                     ss.held_by = None
                     ss.held_until = None
 
+    async def _update_showtime_status_if_needed(self, showtime: Showtime) -> None:
+        """Dynamically transition showtime status (SCHEDULED -> ONGOING -> COMPLETED) based on current time."""
+        if showtime.status == ShowtimeStatus.CANCELLED:
+            return
+
+        now = datetime.now(timezone.utc)
+        start = (
+            showtime.start_time.replace(tzinfo=timezone.utc)
+            if showtime.start_time.tzinfo is None
+            else showtime.start_time.astimezone(timezone.utc)
+        )
+        end = (
+            showtime.end_time.replace(tzinfo=timezone.utc)
+            if showtime.end_time.tzinfo is None
+            else showtime.end_time.astimezone(timezone.utc)
+        )
+
+        new_status = None
+        if now >= end:
+            if showtime.status != ShowtimeStatus.COMPLETED:
+                new_status = ShowtimeStatus.COMPLETED
+        elif now >= start:
+            if showtime.status == ShowtimeStatus.SCHEDULED:
+                new_status = ShowtimeStatus.ONGOING
+
+        if new_status:
+            showtime.status = new_status
+            self.db.add(showtime)
+            await self.db.flush()
+
     async def get_showtimes(
         self,
         pagination: PaginationParams,
@@ -78,6 +108,7 @@ class ShowtimeService:
         
         for st in showtimes:
             self._apply_lazy_expiration(st.showtime_seats)
+            await self._update_showtime_status_if_needed(st)
 
         return list(showtimes), total
 
@@ -97,6 +128,7 @@ class ShowtimeService:
             raise NotFoundException("Showtime", showtime_id)
         
         self._apply_lazy_expiration(showtime.showtime_seats)
+        await self._update_showtime_status_if_needed(showtime)
         return showtime
 
     async def create_showtime(self, data: ShowtimeCreate) -> Showtime:

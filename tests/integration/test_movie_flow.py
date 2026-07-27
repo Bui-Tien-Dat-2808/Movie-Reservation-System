@@ -303,3 +303,33 @@ class TestShowtimeCRUD:
         assert resp.status_code == 422
         data = resp.json()
         assert "now_showing" in data["detail"].lower()
+
+    async def test_showtime_dynamic_status_transition(
+        self, client: AsyncClient, test_admin, db_session: AsyncSession
+    ):
+        """Showtime status should dynamically transition to ongoing or completed based on time."""
+        from app.services.showtime_service import ShowtimeService
+        from app.services.cache_service import CacheService
+        from tests.integration.test_reservation_flow import create_test_showtime
+
+        _, _, _, showtime, _ = await create_test_showtime(db_session)
+        service = ShowtimeService(db_session, CacheService(None))
+
+        # Initially 3 days in future -> SCHEDULED
+        st = await service.get_showtime(showtime.id)
+        assert st.status == ShowtimeStatus.SCHEDULED
+
+        # Set start_time to past and end_time to future -> ONGOING
+        showtime.start_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        showtime.end_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        await db_session.commit()
+
+        st_ongoing = await service.get_showtime(showtime.id)
+        assert st_ongoing.status == ShowtimeStatus.ONGOING
+
+        # Set end_time to past -> COMPLETED
+        showtime.end_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        await db_session.commit()
+
+        st_completed = await service.get_showtime(showtime.id)
+        assert st_completed.status == ShowtimeStatus.COMPLETED
