@@ -13,6 +13,7 @@ from app.schemas.reservation import (
     ReservationResponse,
     RevenueReportResponse,
     ShowtimeCapacityResponse,
+    ShowtimeSummary,
 )
 from app.services.cache_service import CacheService
 from app.services.reservation_service import ReservationService
@@ -148,7 +149,7 @@ async def capacity_report(
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _build_reservation_response(reservation) -> ReservationResponse:
-    """Build reservation response with enriched seat data."""
+    """Build reservation response with enriched seat data and showtime/movie info."""
     from app.schemas.reservation import ReservationSeatResponse
 
     seats = []
@@ -166,6 +167,19 @@ def _build_reservation_response(reservation) -> ReservationResponse:
             seat_data["col_number"] = seat.col_number
         seats.append(ReservationSeatResponse(**seat_data))
 
+    # Build lightweight showtime summary with movie & room info
+    showtime_summary = None
+    if reservation.showtime:
+        st = reservation.showtime
+        showtime_summary = ShowtimeSummary(
+            id=st.id,
+            movie_title=st.movie.title if st.movie else None,
+            movie_poster_url=st.movie.poster_url if st.movie else None,
+            room_name=st.room.name if st.room else None,
+            start_time=st.start_time,
+            end_time=st.end_time,
+        )
+
     return ReservationResponse(
         id=reservation.id,
         showtime_id=reservation.showtime_id,
@@ -174,5 +188,6 @@ def _build_reservation_response(reservation) -> ReservationResponse:
         status=reservation.status,
         notes=reservation.notes,
         reservation_seats=seats,
+        showtime=showtime_summary,
         created_at=reservation.created_at,
     )

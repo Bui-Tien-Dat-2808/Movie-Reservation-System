@@ -159,7 +159,9 @@ class ReservationService:
             .limit(pagination.limit)
             .order_by(Reservation.created_at.desc())
             .options(
-                selectinload(Reservation.reservation_seats),
+                selectinload(Reservation.reservation_seats)
+                .selectinload(ReservationSeat.showtime_seat)
+                .selectinload(ShowtimeSeat.seat),
                 selectinload(Reservation.showtime).selectinload(Showtime.movie),
                 selectinload(Reservation.showtime).selectinload(Showtime.room),
             )
@@ -229,7 +231,9 @@ class ReservationService:
             .limit(pagination.limit)
             .order_by(Reservation.created_at.desc())
             .options(
-                selectinload(Reservation.reservation_seats),
+                selectinload(Reservation.reservation_seats)
+                .selectinload(ReservationSeat.showtime_seat)
+                .selectinload(ShowtimeSeat.seat),
                 selectinload(Reservation.showtime).selectinload(Showtime.movie),
                 selectinload(Reservation.showtime).selectinload(Showtime.room),
                 selectinload(Reservation.user),

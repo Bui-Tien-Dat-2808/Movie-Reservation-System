@@ -5,7 +5,18 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.models.reservation import ReservationStatus
-from app.schemas.showtime import ShowtimeResponse
+
+
+class ShowtimeSummary(BaseModel):
+    """Lightweight showtime info embedded in reservation responses."""
+    id: int
+    movie_title: Optional[str] = None
+    movie_poster_url: Optional[str] = None
+    room_name: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class ReservationSeatResponse(BaseModel):
@@ -33,7 +44,7 @@ class ReservationResponse(BaseModel):
     status: ReservationStatus
     notes: Optional[str] = None
     reservation_seats: List[ReservationSeatResponse] = []
-    showtime: Optional[ShowtimeResponse] = None
+    showtime: Optional[ShowtimeSummary] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -45,6 +56,7 @@ class ReservationListResponse(BaseModel):
     total_price: Decimal
     status: ReservationStatus
     seat_count: int = 0
+    showtime: Optional[ShowtimeSummary] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

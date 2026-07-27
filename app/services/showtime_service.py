@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.core.exceptions import ConflictException, NotFoundException, ValidationException
-from app.models.movie import Movie
+from app.models.movie import Movie, MovieGenre, MovieStatus
 from app.models.seat import Seat
 from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
@@ -68,8 +68,8 @@ class ShowtimeService:
             .limit(pagination.limit)
             .order_by(Showtime.start_time)
             .options(
-                selectinload(Showtime.movie),
-                selectinload(Showtime.room),
+                selectinload(Showtime.movie).selectinload(Movie.movie_genres).selectinload(MovieGenre.genre),
+                selectinload(Showtime.room).selectinload(Room.seats),
                 selectinload(Showtime.showtime_seats),
             )
         )
@@ -87,8 +87,8 @@ class ShowtimeService:
             select(Showtime)
             .where(Showtime.id == showtime_id)
             .options(
-                selectinload(Showtime.movie),
-                selectinload(Showtime.room),
+                selectinload(Showtime.movie).selectinload(Movie.movie_genres).selectinload(MovieGenre.genre),
+                selectinload(Showtime.room).selectinload(Room.seats),
                 selectinload(Showtime.showtime_seats).selectinload(ShowtimeSeat.seat),
             )
         )
@@ -101,10 +101,17 @@ class ShowtimeService:
 
     async def create_showtime(self, data: ShowtimeCreate) -> Showtime:
         """Create showtime and generate seat slots."""
-        # Validate movie exists
+        # Validate movie exists and is active
         movie = await self.db.get(Movie, data.movie_id)
         if not movie or not movie.is_active:
             raise NotFoundException("Movie", data.movie_id)
+
+        # Only allow showtimes for movies that are currently showing
+        if movie.status != MovieStatus.NOW_SHOWING:
+            raise ValidationException(
+                f"Cannot create a showtime for this movie. "
+                f"Movie status is '{movie.status.value}' — only 'now_showing' movies are allowed."
+            )
 
         # Validate room exists
         room_result = await self.db.execute(
@@ -157,7 +164,7 @@ class ShowtimeService:
         await self.db.refresh(showtime)
         await self.cache.delete_pattern("showtimes:*")
         logger.info("Showtime created", showtime_id=showtime.id)
-        return showtime
+        return await self.get_showtime(showtime.id)
 
     async def update_showtime(self, showtime_id: int, data: ShowtimeUpdate) -> Showtime:
         """Update showtime."""
@@ -165,13 +172,15 @@ class ShowtimeService:
 
         update_data = data.model_dump(exclude_unset=True)
         for field, value in update_data.items():
+            if value is None and field in {"start_time", "end_time", "base_price", "status"}:
+                continue
             setattr(showtime, field, value)
 
         await self.db.flush()
         await self.db.refresh(showtime)
         await self.cache.delete_pattern("showtimes:*")
         logger.info("Showtime updated", showtime_id=showtime_id)
-        return showtime
+        return await self.get_showtime(showtime_id)
 
     async def cancel_showtime(self, showtime_id: int) -> Showtime:
         """Cancel a showtime."""

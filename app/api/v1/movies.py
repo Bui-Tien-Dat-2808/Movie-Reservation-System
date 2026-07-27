@@ -40,9 +40,35 @@ async def list_movies(
     List movies with optional filtering:
     - Search by title
     - Filter by genre
-    - Filter by status (active, inactive, coming_soon)
+    - Filter by status (now_showing, coming_soon, ended)
     """
     movies, total = await service.get_movies(pagination, genre_id, search, status_filter)
+    return paginate(
+        [MovieListResponse.model_validate(m) for m in movies],
+        total,
+        pagination.page,
+        pagination.page_size,
+    )
+
+
+@router.get(
+    "/now-showing",
+    response_model=PaginatedResponse[MovieListResponse],
+    summary="List now-showing movies (Public)",
+)
+async def list_now_showing(
+    pagination: PaginationParams = Depends(),
+    search: Optional[str] = Query(None, description="Search by title"),
+    genre_id: Optional[int] = Query(None, description="Filter by genre"),
+    service: MovieService = Depends(get_movie_service),
+):
+    """
+    Public: Get all movies currently showing in theaters.
+    No authentication required — accessible by guests, users, and admins.
+    """
+    movies, total = await service.get_movies(
+        pagination, genre_id, search, status=MovieStatus.NOW_SHOWING
+    )
     return paginate(
         [MovieListResponse.model_validate(m) for m in movies],
         total,

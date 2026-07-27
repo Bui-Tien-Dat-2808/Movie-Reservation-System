@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 import structlog
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -123,6 +123,8 @@ class MovieService:
 
         update_data = data.model_dump(exclude_unset=True, exclude={"genre_ids"})
         for field, value in update_data.items():
+            if value is None and field in {"title", "status"}:
+                continue
             setattr(movie, field, value)
 
         if data.genre_ids is not None:
@@ -176,16 +178,29 @@ class MovieService:
             self.db.add(movie)
             await self.db.flush()
 
-        # Sync genres
+        # Sync genres — use case-insensitive get-or-create to avoid UniqueViolation
         genre_names = tmdb_data.get("genres", [])
         genre_ids = []
         for genre_name in genre_names:
-            result = await self.db.execute(select(Genre).where(Genre.name == genre_name))
+            # Case-insensitive lookup to prevent duplicates
+            result = await self.db.execute(
+                select(Genre).where(func.lower(Genre.name) == genre_name.lower())
+            )
             genre = result.scalar_one_or_none()
             if not genre:
                 genre = Genre(name=genre_name)
                 self.db.add(genre)
-                await self.db.flush()
+                try:
+                    await self.db.flush()
+                except Exception:
+                    # Another concurrent request inserted the same genre — fetch it
+                    await self.db.rollback()
+                    result = await self.db.execute(
+                        select(Genre).where(func.lower(Genre.name) == genre_name.lower())
+                    )
+                    genre = result.scalar_one_or_none()
+                    if not genre:
+                        raise
             genre_ids.append(genre.id)
 
         if genre_ids:
@@ -195,7 +210,14 @@ class MovieService:
         await self.db.refresh(movie)
         await self.cache.delete_pattern(f"{CACHE_KEY_MOVIES}*")
         logger.info("Movie synced from TMDB", tmdb_id=tmdb_id, movie_id=movie.id)
-        return movie
+        
+        # Eager load relationships to avoid Pydantic lazy load errors during serialization
+        result = await self.db.execute(
+            select(Movie)
+            .where(Movie.id == movie.id)
+            .options(selectinload(Movie.movie_genres).selectinload(MovieGenre.genre))
+        )
+        return result.scalar_one()
 
     async def _set_genres(self, movie_id: int, genre_ids: List[int]) -> None:
         """Replace all genres for a movie."""

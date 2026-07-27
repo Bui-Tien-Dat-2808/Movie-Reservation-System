@@ -14,7 +14,7 @@ from app.db.base import Base
 
 # Import all models so Alembic can detect them
 from app.models import (  # noqa: F401
-    User, Genre, Movie, MovieGenre, Theater, Seat,
+    User, Genre, Movie, MovieGenre, Room, Seat,
     Showtime, ShowtimeSeat, Reservation, ReservationSeat
 )
 

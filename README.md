@@ -10,7 +10,7 @@ A production-grade backend API for movie seat reservations built with **FastAPI*
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker)](https://docs.docker.com/compose/)
 
 ---
-
+http://localhost:8000/api/v1/openapi.json
 ## ✨ Features
 
 | Feature | Details |

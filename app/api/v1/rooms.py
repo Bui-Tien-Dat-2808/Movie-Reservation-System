@@ -126,6 +126,8 @@ async def update_room(
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
+        if value is None and field in {"name", "room_type", "total_rows", "total_cols", "is_active"}:
+            continue
         setattr(room, field, value)
 
     await db.flush()
