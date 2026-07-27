@@ -1,7 +1,15 @@
 """Integration tests for Movies API."""
 import pytest
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.movie import Movie, MovieStatus
+from app.models.room import Room
+from app.models.seat import Seat, SeatType
+from app.models.showtime import Showtime, ShowtimeStatus
+from app.models.showtime_seat import ShowtimeSeat, SeatStatus
 from tests.conftest import get_auth_headers
 
 
@@ -119,3 +127,179 @@ class TestRoomCRUD:
     async def test_list_rooms(self, client: AsyncClient):
         response = await client.get("/api/v1/rooms/")
         assert response.status_code == 200
+
+
+class TestNowShowing:
+    """Tests for GET /api/v1/movies/now-showing endpoint."""
+
+    async def test_now_showing_no_auth_required(self, client: AsyncClient):
+        """Public endpoint — no authentication required."""
+        response = await client.get("/api/v1/movies/now-showing")
+        assert response.status_code == 200
+        data = response.json()
+        assert "items" in data
+        assert "meta" in data
+
+    async def test_now_showing_empty_when_no_movies(self, client: AsyncClient):
+        """Should return empty list when DB has no movies."""
+        response = await client.get("/api/v1/movies/now-showing")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["items"] == []
+        assert data["meta"]["total"] == 0
+
+    async def test_now_showing_returns_only_now_showing_movies(
+        self, client: AsyncClient, test_admin
+    ):
+        """Should return only movies with status=now_showing, not coming_soon or ended."""
+        headers = get_auth_headers(test_admin)
+
+        # Create movies with all 3 statuses
+        await client.post("/api/v1/movies/", json={
+            "title": "Now Showing Film",
+            "status": "now_showing",
+        }, headers=headers)
+        await client.post("/api/v1/movies/", json={
+            "title": "Coming Soon Film",
+            "status": "coming_soon",
+        }, headers=headers)
+        await client.post("/api/v1/movies/", json={
+            "title": "Ended Film",
+            "status": "ended",
+        }, headers=headers)
+
+        response = await client.get("/api/v1/movies/now-showing")
+        assert response.status_code == 200
+        data = response.json()
+
+        titles = [item["title"] for item in data["items"]]
+        assert "Now Showing Film" in titles
+        assert "Coming Soon Film" not in titles
+        assert "Ended Film" not in titles
+
+    async def test_now_showing_search_filter(self, client: AsyncClient, test_admin):
+        """Search filter should work on now-showing endpoint."""
+        headers = get_auth_headers(test_admin)
+
+        await client.post("/api/v1/movies/", json={
+            "title": "Avengers Endgame",
+            "status": "now_showing",
+        }, headers=headers)
+        await client.post("/api/v1/movies/", json={
+            "title": "Interstellar",
+            "status": "now_showing",
+        }, headers=headers)
+
+        response = await client.get("/api/v1/movies/now-showing?search=Avengers")
+        assert response.status_code == 200
+        data = response.json()
+        titles = [item["title"] for item in data["items"]]
+        assert any("Avengers" in t for t in titles)
+        assert not any("Interstellar" in t for t in titles)
+
+    async def test_now_showing_pagination(self, client: AsyncClient, test_admin):
+        """Pagination should work correctly."""
+        headers = get_auth_headers(test_admin)
+
+        # Create 3 now_showing movies
+        for i in range(3):
+            await client.post("/api/v1/movies/", json={
+                "title": f"Movie Paginate {i}",
+                "status": "now_showing",
+            }, headers=headers)
+
+        response = await client.get("/api/v1/movies/now-showing?page=1&page_size=2")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["items"]) <= 2
+        assert data["meta"]["page"] == 1
+        assert data["meta"]["page_size"] == 2
+
+
+class TestShowtimeCRUD:
+    """Tests for showtime creation — validates MovieStatus.NOW_SHOWING constraint."""
+
+    async def _create_room(self, client: AsyncClient, headers: dict, name: str = "Test Room") -> int:
+        """Helper: create a room and return its ID."""
+        resp = await client.post("/api/v1/rooms/", json={
+            "name": name,
+            "room_type": "standard",
+            "total_rows": 3,
+            "total_cols": 5,
+        }, headers=headers)
+        assert resp.status_code == 201
+        return resp.json()["id"]
+
+    async def _create_movie(self, client: AsyncClient, headers: dict, status: str, title: str) -> int:
+        """Helper: create a movie with given status and return its ID."""
+        resp = await client.post("/api/v1/movies/", json={
+            "title": title,
+            "status": status,
+        }, headers=headers)
+        assert resp.status_code == 201
+        return resp.json()["id"]
+
+    def _showtime_payload(self, movie_id: int, room_id: int) -> dict:
+        start = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=2, hours=2)).isoformat()
+        return {
+            "movie_id": movie_id,
+            "room_id": room_id,
+            "start_time": start,
+            "end_time": end,
+            "base_price": "90000.0",
+            "vip_price": "120000.0",
+        }
+
+    async def test_create_showtime_for_now_showing_movie_succeeds(
+        self, client: AsyncClient, test_admin
+    ):
+        """Showtime creation succeeds for a movie with status=now_showing."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "now_showing", "Now Playing Movie")
+        room_id = await self._create_room(client, headers, "Room A1")
+
+        resp = await client.post(
+            "/api/v1/showtimes/",
+            json=self._showtime_payload(movie_id, room_id),
+            headers=headers,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["movie_id"] == movie_id
+        assert data["room_id"] == room_id
+        assert data["status"] == "scheduled"
+
+    async def test_create_showtime_for_coming_soon_movie_fails(
+        self, client: AsyncClient, test_admin
+    ):
+        """Showtime creation should be rejected for a coming_soon movie (422)."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "coming_soon", "Upcoming Movie")
+        room_id = await self._create_room(client, headers, "Room B1")
+
+        resp = await client.post(
+            "/api/v1/showtimes/",
+            json=self._showtime_payload(movie_id, room_id),
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        data = resp.json()
+        assert "now_showing" in data["detail"].lower()
+
+    async def test_create_showtime_for_ended_movie_fails(
+        self, client: AsyncClient, test_admin
+    ):
+        """Showtime creation should be rejected for an ended movie (422)."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "ended", "Old Movie")
+        room_id = await self._create_room(client, headers, "Room C1")
+
+        resp = await client.post(
+            "/api/v1/showtimes/",
+            json=self._showtime_payload(movie_id, room_id),
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        data = resp.json()
+        assert "now_showing" in data["detail"].lower()

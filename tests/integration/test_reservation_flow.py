@@ -181,3 +181,99 @@ class TestReservationFlow:
         headers = get_auth_headers(test_user)
         response = await client.get("/api/v1/reservations/admin/report/revenue", headers=headers)
         assert response.status_code == 403
+
+
+class TestReservationShowtimeSummary:
+    """Tests that reservation responses embed ShowtimeSummary (movie_title, room_name, etc.)."""
+
+    async def test_reservation_detail_includes_showtime_summary(
+        self, client: AsyncClient, test_user, db_session: AsyncSession
+    ):
+        """Reservation detail should include showtime with movie_title and room_name."""
+        movie, room, seats, showtime, _ = await create_test_showtime(db_session)
+        headers = get_auth_headers(test_user)
+
+        # Hold then create reservation
+        await client.post(f"/api/v1/showtimes/{showtime.id}/hold", json={
+            "seat_ids": [seats[0].id],
+        }, headers=headers)
+
+        create_resp = await client.post("/api/v1/reservations/", json={
+            "showtime_id": showtime.id,
+            "seat_ids": [seats[0].id],
+        }, headers=headers)
+        assert create_resp.status_code == 201
+        reservation_id = create_resp.json()["id"]
+
+        # Fetch detail
+        detail_resp = await client.get(f"/api/v1/reservations/{reservation_id}", headers=headers)
+        assert detail_resp.status_code == 200
+        data = detail_resp.json()
+
+        # ShowtimeSummary must be present and populated
+        assert data["showtime"] is not None
+        assert data["showtime"]["id"] == showtime.id
+        assert data["showtime"]["movie_title"] == movie.title
+        assert data["showtime"]["room_name"] == room.name
+        assert "start_time" in data["showtime"]
+        assert "end_time" in data["showtime"]
+
+    async def test_my_reservations_list_includes_showtime_summary(
+        self, client: AsyncClient, test_user, db_session: AsyncSession
+    ):
+        """GET /reservations/ list should include showtime summary in each item."""
+        _, room, seats, showtime, _ = await create_test_showtime(db_session)
+        headers = get_auth_headers(test_user)
+
+        # Hold then create
+        await client.post(f"/api/v1/showtimes/{showtime.id}/hold", json={
+            "seat_ids": [seats[0].id],
+        }, headers=headers)
+        await client.post("/api/v1/reservations/", json={
+            "showtime_id": showtime.id,
+            "seat_ids": [seats[0].id],
+        }, headers=headers)
+
+        response = await client.get("/api/v1/reservations/", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["meta"]["total"] >= 1
+        first = data["items"][0]
+        # Each item in the list must carry showtime summary
+        assert first["showtime"] is not None
+        assert "movie_title" in first["showtime"]
+        assert "room_name" in first["showtime"]
+        assert "start_time" in first["showtime"]
+
+    async def test_admin_reservation_list_includes_showtime_summary(
+        self, client: AsyncClient, test_user, test_admin, db_session: AsyncSession
+    ):
+        """Admin GET /reservations/admin/all should also include showtime summary."""
+        _, _, seats, showtime, _ = await create_test_showtime(db_session)
+        user_headers = get_auth_headers(test_user)
+        admin_headers = get_auth_headers(test_admin)
+
+        # User holds and creates reservation
+        await client.post(f"/api/v1/showtimes/{showtime.id}/hold", json={
+            "seat_ids": [seats[0].id],
+        }, headers=user_headers)
+        await client.post("/api/v1/reservations/", json={
+            "showtime_id": showtime.id,
+            "seat_ids": [seats[0].id],
+        }, headers=user_headers)
+
+        # Admin fetches all reservations
+        response = await client.get(
+            "/api/v1/reservations/admin/all?page=1&page_size=20",
+            headers=admin_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["meta"]["total"] >= 1
+        first = data["items"][0]
+        assert first["showtime"] is not None
+        assert "movie_title" in first["showtime"]
+        assert "room_name" in first["showtime"]
+
