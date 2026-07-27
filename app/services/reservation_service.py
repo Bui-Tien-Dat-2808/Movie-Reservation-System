@@ -64,10 +64,21 @@ class ReservationService:
             missing = set(data.seat_ids) - {s.seat_id for s in locked_seats}
             raise NotFoundException(f"Seats {list(missing)} not found in this showtime")
 
-        # Check availability
-        unavailable = [s.seat_id for s in locked_seats if s.status != SeatStatus.AVAILABLE]
-        if unavailable:
-            raise SeatUnavailableException(unavailable)
+        # Check if held by this user and not expired
+        now = datetime.now(timezone.utc)
+        
+        for ss in locked_seats:
+            is_valid_hold = (
+                ss.status == SeatStatus.HELD
+                and ss.held_by == user_id
+                and ss.held_until is not None
+                and (
+                    ss.held_until.replace(tzinfo=timezone.utc) if ss.held_until.tzinfo is None 
+                    else ss.held_until.astimezone(timezone.utc)
+                ) >= now
+            )
+            if not is_valid_hold:
+                raise SeatUnavailableException([ss.seat_id])
 
         # Calculate total price
         total_price = Decimal("0")
@@ -97,7 +108,9 @@ class ReservationService:
 
         # Create reservation seats and update showtime_seat status
         for ss in locked_seats:
-            ss.status = SeatStatus.RESERVED
+            ss.status = SeatStatus.BOOKED
+            ss.held_by = None
+            ss.held_until = None
             rs = ReservationSeat(
                 reservation_id=reservation.id,
                 showtime_seat_id=ss.id,
@@ -276,7 +289,7 @@ class ReservationService:
         for st in showtimes:
             total_seats = len(st.showtime_seats)
             reserved_seats = sum(
-                1 for s in st.showtime_seats if s.status == SeatStatus.RESERVED
+                1 for s in st.showtime_seats if s.status == SeatStatus.BOOKED
             )
             available_seats = total_seats - reserved_seats
             occupancy_rate = (reserved_seats / total_seats * 100) if total_seats > 0 else 0

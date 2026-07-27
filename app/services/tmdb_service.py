@@ -129,3 +129,41 @@ class TMDBService:
             "total_results": data.get("total_results", 0),
             "total_pages": data.get("total_pages", 0),
         }
+
+    async def get_list_movies(self, list_id: str, page: int = 1) -> Dict[str, Any]:
+        """Get movies from a specific TMDB list."""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/list/{list_id}",
+                params={"api_key": self.api_key, "page": page, "language": "en-US"},
+                timeout=10.0,
+            )
+
+        if response.status_code == 404:
+            raise NotFoundException("TMDB List", list_id)
+
+        response.raise_for_status()
+        data = response.json()
+
+        results = []
+        for movie in data.get("items", []):
+            poster_url = None
+            if movie.get("poster_path"):
+                poster_url = f"{self.image_base_url}{movie['poster_path']}"
+            results.append({
+                "tmdb_id": movie["id"],
+                "title": movie["title"],
+                "overview": movie.get("overview"),
+                "poster_url": poster_url,
+                "release_date": movie.get("release_date"),
+            })
+
+        return {
+            "list_name": data.get("name"),
+            "description": data.get("description"),
+            "results": results,
+            "total_results": data.get("total_results", data.get("item_count", 0)),
+            "total_pages": data.get("total_pages", 1),
+            "page": data.get("page", 1),
+        }
+

@@ -17,7 +17,7 @@ from tests.conftest import get_auth_headers
 async def create_test_showtime(db: AsyncSession) -> tuple:
     """Helper: create a movie, room, seats, and showtime for testing."""
     # Movie
-    movie = Movie(title="Test Movie", status=MovieStatus.ACTIVE, is_active=True)
+    movie = Movie(title="Test Movie", status=MovieStatus.NOW_SHOWING, is_active=True)
     db.add(movie)
     await db.flush()
 
@@ -81,6 +81,12 @@ class TestReservationFlow:
         headers = get_auth_headers(test_user)
 
         seat_ids = [seats[0].id, seats[1].id]
+        # Hold first
+        hold_resp = await client.post(f"/api/v1/showtimes/{showtime.id}/hold", json={
+            "seat_ids": seat_ids,
+        }, headers=headers)
+        assert hold_resp.status_code == 200
+
         response = await client.post("/api/v1/reservations/", json={
             "showtime_id": showtime.id,
             "seat_ids": seat_ids,
@@ -108,6 +114,12 @@ class TestReservationFlow:
         _, _, seats, showtime, _ = await create_test_showtime(db_session)
         headers = get_auth_headers(test_user)
 
+        # Hold first
+        hold_resp = await client.post(f"/api/v1/showtimes/{showtime.id}/hold", json={
+            "seat_ids": [seats[0].id],
+        }, headers=headers)
+        assert hold_resp.status_code == 200
+
         # Create a reservation first
         await client.post("/api/v1/reservations/", json={
             "showtime_id": showtime.id,
@@ -125,6 +137,12 @@ class TestReservationFlow:
         """User should be able to cancel upcoming reservation."""
         _, _, seats, showtime, _ = await create_test_showtime(db_session)
         headers = get_auth_headers(test_user)
+
+        # Hold first
+        hold_resp = await client.post(f"/api/v1/showtimes/{showtime.id}/hold", json={
+            "seat_ids": [seats[0].id],
+        }, headers=headers)
+        assert hold_resp.status_code == 200
 
         create_resp = await client.post("/api/v1/reservations/", json={
             "showtime_id": showtime.id,

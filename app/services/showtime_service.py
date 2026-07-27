@@ -25,6 +25,20 @@ class ShowtimeService:
         self.db = db
         self.cache = cache
 
+    def _apply_lazy_expiration(self, showtime_seats: List[ShowtimeSeat]) -> None:
+        """Dynamically update held seat status in memory if they have expired."""
+        now = datetime.now(timezone.utc)
+        for ss in showtime_seats:
+            if ss.status == SeatStatus.HELD and ss.held_until:
+                held_until_aware = (
+                    ss.held_until.replace(tzinfo=timezone.utc) if ss.held_until.tzinfo is None
+                    else ss.held_until.astimezone(timezone.utc)
+                )
+                if held_until_aware < now:
+                    ss.status = SeatStatus.AVAILABLE
+                    ss.held_by = None
+                    ss.held_until = None
+
     async def get_showtimes(
         self,
         pagination: PaginationParams,
@@ -61,6 +75,10 @@ class ShowtimeService:
         )
         result = await self.db.execute(query)
         showtimes = result.scalars().all()
+        
+        for st in showtimes:
+            self._apply_lazy_expiration(st.showtime_seats)
+
         return list(showtimes), total
 
     async def get_showtime(self, showtime_id: int) -> Showtime:
@@ -77,6 +95,8 @@ class ShowtimeService:
         showtime = result.scalar_one_or_none()
         if not showtime:
             raise NotFoundException("Showtime", showtime_id)
+        
+        self._apply_lazy_expiration(showtime.showtime_seats)
         return showtime
 
     async def create_showtime(self, data: ShowtimeCreate) -> Showtime:
@@ -173,7 +193,7 @@ class ShowtimeService:
         for ss in showtime.showtime_seats:
             if ss.status == SeatStatus.AVAILABLE:
                 available_count += 1
-            elif ss.status == SeatStatus.RESERVED:
+            elif ss.status == SeatStatus.BOOKED:
                 reserved_count += 1
 
             seats.append(ss)

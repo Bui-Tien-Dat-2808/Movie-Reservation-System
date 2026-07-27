@@ -21,7 +21,7 @@ class TestMoviesCRUD:
             "title": "Inception",
             "description": "A mind-bending thriller",
             "duration_minutes": 148,
-            "status": "active",
+            "status": "now_showing",
         }, headers=headers)
         assert response.status_code == 201
         data = response.json()
@@ -48,7 +48,7 @@ class TestMoviesCRUD:
         # Create movie first
         create_resp = await client.post("/api/v1/movies/", json={
             "title": "Original Title",
-            "status": "active",
+            "status": "now_showing",
         }, headers=headers)
         movie_id = create_resp.json()["id"]
 
@@ -66,7 +66,7 @@ class TestMoviesCRUD:
 
         create_resp = await client.post("/api/v1/movies/", json={
             "title": "To Be Deleted",
-            "status": "active",
+            "status": "now_showing",
         }, headers=headers)
         movie_id = create_resp.json()["id"]
 

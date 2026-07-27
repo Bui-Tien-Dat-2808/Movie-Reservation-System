@@ -15,7 +15,7 @@ class MovieBase(BaseModel):
     release_date: Optional[date] = None
     language: Optional[str] = Field(None, max_length=100)
     rating: Optional[str] = Field(None, max_length=10)
-    status: MovieStatus = MovieStatus.ACTIVE
+    status: MovieStatus = MovieStatus.NOW_SHOWING
 
 
 class MovieCreate(MovieBase):

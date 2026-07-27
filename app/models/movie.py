@@ -9,9 +9,9 @@ from app.db.base import Base
 
 
 class MovieStatus(str, enum.Enum):
-    ACTIVE = "active"
-    INACTIVE = "inactive"
+    NOW_SHOWING = "now_showing"
     COMING_SOON = "coming_soon"
+    ENDED = "ended"
 
 
 class MovieGenre(Base):
@@ -42,7 +42,7 @@ class Movie(Base):
     rating: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # e.g. PG-13
     tmdb_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True, index=True)
     status: Mapped[MovieStatus] = mapped_column(
-        Enum(MovieStatus), default=MovieStatus.ACTIVE, nullable=False
+        Enum(MovieStatus), default=MovieStatus.NOW_SHOWING, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

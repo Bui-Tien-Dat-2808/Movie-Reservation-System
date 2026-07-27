@@ -4,7 +4,7 @@ import structlog
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, get_redis, require_admin
+from app.dependencies import get_db, get_redis, require_admin, get_current_user
 from app.models.movie import MovieStatus
 from app.schemas.common import PaginatedResponse
 from app.schemas.movie import MovieCreate, MovieListResponse, MovieResponse, MovieUpdate
@@ -143,3 +143,17 @@ async def get_tmdb_popular(
     """Admin: get popular movies from TMDB."""
     tmdb_service = TMDBService()
     return await tmdb_service.get_popular_movies(page)
+
+
+@router.get(
+    "/tmdb/list/{list_id}",
+    summary="Get movies from a TMDB list",
+)
+async def get_tmdb_list_movies(
+    list_id: str,
+    page: int = Query(1, ge=1),
+    _=Depends(get_current_user),
+):
+    """Get movies from a TMDB list (Admin and Users)."""
+    tmdb_service = TMDBService()
+    return await tmdb_service.get_list_movies(list_id, page)

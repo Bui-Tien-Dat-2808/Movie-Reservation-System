@@ -14,9 +14,20 @@ class ShowtimeSeatResponse(BaseModel):
     id: int
     seat_id: int
     status: SeatStatus
+    held_until: Optional[datetime] = None
     seat: SeatResponse
 
     model_config = {"from_attributes": True}
+
+
+class SeatHoldRequest(BaseModel):
+    seat_ids: List[int] = Field(..., min_length=1, max_length=10)
+
+
+class SeatHoldResponse(BaseModel):
+    showtime_id: int
+    seat_ids: List[int]
+    held_until: datetime
 
 
 class ShowtimeBase(BaseModel):
