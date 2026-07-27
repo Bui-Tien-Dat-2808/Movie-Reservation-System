@@ -10,7 +10,6 @@ A production-grade backend API for movie seat reservations built with **FastAPI*
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker)](https://docs.docker.com/compose/)
 
 ---
-http://localhost:8000/api/v1/openapi.json
 ## ✨ Features
 
 | Feature | Details |
@@ -303,6 +302,10 @@ Import the collection from the Swagger JSON:
 
 ---
 
+## Project URL
+https://roadmap.sh/projects/movie-reservation-system
+
+---
 ## 📄 License
 
 MIT License — feel free to use this project as a reference or starting point.
