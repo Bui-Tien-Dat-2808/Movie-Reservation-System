@@ -149,7 +149,12 @@ async def hold_seats(
 ):
     """
     Temporarily hold seats for a showtime (10 minutes).
-    Uses SELECT FOR UPDATE to prevent race conditions.
+
+    Uses SELECT FOR UPDATE to prevent race conditions:
+    - If two users request the same last seat simultaneously, PostgreSQL serializes
+      the lock. The second user will see the seat as HELD after the first commits,
+      and receive a 409 SEAT_UNAVAILABLE response with a clear error message.
+    - A user may re-hold seats they already hold (extends the hold by 10 minutes).
     """
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import select
@@ -166,7 +171,10 @@ async def hold_seats(
     if showtime.start_time.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise ShowtimePastException()
 
-    # 2. Lock requested seats in a transaction
+    # 2. Lock requested ShowtimeSeats with SELECT FOR UPDATE.
+    #    This serializes concurrent requests for the same seat:
+    #    the second request blocks here until the first transaction commits,
+    #    then reads the updated status (HELD) and correctly raises 409.
     result = await db.execute(
         select(ShowtimeSeat)
         .where(
@@ -181,22 +189,48 @@ async def hold_seats(
         missing = set(data.seat_ids) - {s.seat_id for s in locked_seats}
         raise NotFoundException(f"Seats {list(missing)} not found in this showtime")
 
-    # 3. Check if all seats are available or hold expired
+    # 3. After acquiring the lock, re-evaluate each seat's true status.
     now = datetime.now(timezone.utc)
-    unavailable_seats = []
+    booked_seats = []
+    held_by_others = []
+
     for ss in locked_seats:
-        is_available = (
-            ss.status == SeatStatus.AVAILABLE or
-            (ss.status == SeatStatus.HELD and ss.held_until is not None and 
-             (ss.held_until.replace(tzinfo=timezone.utc) if ss.held_until.tzinfo is None else ss.held_until.astimezone(timezone.utc)) < now)
+        if ss.status == SeatStatus.BOOKED:
+            # Already purchased — cannot hold
+            booked_seats.append(ss.seat_id)
+        elif ss.status == SeatStatus.HELD:
+            held_until_aware = (
+                ss.held_until.replace(tzinfo=timezone.utc)
+                if ss.held_until and ss.held_until.tzinfo is None
+                else (ss.held_until.astimezone(timezone.utc) if ss.held_until else None)
+            )
+            hold_still_active = held_until_aware and held_until_aware > now
+            held_by_someone_else = ss.held_by != user.id
+
+            if hold_still_active and held_by_someone_else:
+                # Another user is actively holding this seat right now
+                held_by_others.append(ss.seat_id)
+            # If held_by == user.id  → allow re-hold (extends the hold timer)
+            # If hold has expired    → treat as AVAILABLE, allow hold
+
+    # Build descriptive error combining all unavailable seats
+    if booked_seats or held_by_others:
+        parts = []
+        if booked_seats:
+            parts.append(f"Seats {booked_seats} are already booked")
+        if held_by_others:
+            parts.append(
+                f"Seats {held_by_others} are currently held by another user — "
+                "please try again in a few minutes"
+            )
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=409,
+            detail="; ".join(parts),
+            headers={"X-Error-Code": "SEAT_UNAVAILABLE"},
         )
-        if not is_available:
-            unavailable_seats.append(ss.seat_id)
 
-    if unavailable_seats:
-        raise SeatUnavailableException(unavailable_seats)
-
-    # 4. Set hold
+    # 4. All seats are either AVAILABLE or already held by this user — set / extend hold
     held_until = now + timedelta(minutes=10)
     for ss in locked_seats:
         ss.status = SeatStatus.HELD

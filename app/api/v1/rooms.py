@@ -1,4 +1,5 @@
 import string
+from datetime import datetime, timezone
 from typing import List
 
 import structlog
@@ -10,7 +11,12 @@ from sqlalchemy.orm import selectinload
 from app.dependencies import get_db, require_admin
 from app.models.seat import Seat, SeatType
 from app.models.room import Room
-from app.schemas.room import RoomCreate, RoomDetailResponse, RoomResponse, RoomUpdate
+from app.models.showtime import Showtime, ShowtimeStatus
+from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+from app.schemas.room import (
+    RoomCreate, RoomDetailResponse, RoomResponse, RoomUpdate,
+    RoomStatusResponse, ActiveShowtimeInfo, SeatStatusItem,
+)
 
 router = APIRouter(prefix="/rooms", tags=["Rooms"])
 logger = structlog.get_logger()
@@ -61,6 +67,129 @@ async def get_room(room_id: int, db: AsyncSession = Depends(get_db)):
         from app.core.exceptions import NotFoundException
         raise NotFoundException("Room", room_id)
     return room
+
+
+@router.get(
+    "/{room_id}/status",
+    response_model=RoomStatusResponse,
+    summary="Get room occupancy status",
+)
+async def get_room_status(room_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Get full occupancy status of a room:
+    - Whether the room is currently in use
+    - Current showtime (ONGOING): movie info, seat-by-seat status breakdown
+    - Upcoming showtimes (SCHEDULED): list with seat availability
+    """
+    from app.core.exceptions import NotFoundException
+
+    # Load room with seats
+    result = await db.execute(
+        select(Room).where(Room.id == room_id).options(selectinload(Room.seats))
+    )
+    room = result.scalar_one_or_none()
+    if not room:
+        raise NotFoundException("Room", room_id)
+
+    # Load all non-cancelled showtimes for this room, eager-load movie & showtime_seats->seat
+    st_result = await db.execute(
+        select(Showtime)
+        .where(
+            Showtime.room_id == room_id,
+            Showtime.status != ShowtimeStatus.CANCELLED,
+        )
+        .options(
+            selectinload(Showtime.movie),
+            selectinload(Showtime.showtime_seats).selectinload(ShowtimeSeat.seat),
+        )
+        .order_by(Showtime.start_time)
+    )
+    showtimes = st_result.scalars().all()
+
+    now = datetime.now(timezone.utc)
+
+    def _make_showtime_info(st: Showtime) -> ActiveShowtimeInfo:
+        """Build ActiveShowtimeInfo from a Showtime ORM object."""
+        seat_items: list[SeatStatusItem] = []
+        counts = {SeatStatus.AVAILABLE: 0, SeatStatus.HELD: 0, SeatStatus.BOOKED: 0}
+
+        for ss in st.showtime_seats:
+            # Apply lazy expiration in-memory (held_until expired → treat as available)
+            effective_status = ss.status
+            if ss.status == SeatStatus.HELD and ss.held_until:
+                held_until_aware = (
+                    ss.held_until.replace(tzinfo=timezone.utc)
+                    if ss.held_until.tzinfo is None
+                    else ss.held_until.astimezone(timezone.utc)
+                )
+                if held_until_aware < now:
+                    effective_status = SeatStatus.AVAILABLE
+
+            counts[effective_status] = counts.get(effective_status, 0) + 1
+
+            seat_items.append(SeatStatusItem(
+                seat_id=ss.seat_id,
+                label=f"{ss.seat.row_label}{ss.seat.col_number}" if ss.seat else str(ss.seat_id),
+                seat_type=ss.seat.seat_type if ss.seat else SeatType.STANDARD,
+                status=effective_status,
+                held_until=ss.held_until if effective_status == SeatStatus.HELD else None,
+            ))
+
+        # Sort seats by label for readability
+        seat_items.sort(key=lambda s: s.label)
+        total = len(seat_items)
+
+        return ActiveShowtimeInfo(
+            showtime_id=st.id,
+            movie_title=st.movie.title if st.movie else "Unknown",
+            movie_poster_url=st.movie.poster_url if st.movie else None,
+            status=st.status,
+            start_time=st.start_time,
+            end_time=st.end_time,
+            base_price=st.base_price,
+            vip_price=st.vip_price,
+            total_seats=total,
+            available_seats=counts.get(SeatStatus.AVAILABLE, 0),
+            held_seats=counts.get(SeatStatus.HELD, 0),
+            booked_seats=counts.get(SeatStatus.BOOKED, 0),
+            seats=seat_items,
+        )
+
+    current_showtime = None
+    upcoming_showtimes = []
+
+    for st in showtimes:
+        start = (
+            st.start_time.replace(tzinfo=timezone.utc)
+            if st.start_time.tzinfo is None
+            else st.start_time.astimezone(timezone.utc)
+        )
+        end = (
+            st.end_time.replace(tzinfo=timezone.utc)
+            if st.end_time.tzinfo is None
+            else st.end_time.astimezone(timezone.utc)
+        )
+
+        if start <= now < end:
+            # Room is actively being used right now
+            current_showtime = _make_showtime_info(st)
+        elif start > now:
+            # Scheduled for the future
+            upcoming_showtimes.append(_make_showtime_info(st))
+
+    is_in_use = current_showtime is not None
+
+    return RoomStatusResponse(
+        room_id=room.id,
+        room_name=room.name,
+        room_type=room.room_type,
+        is_active=room.is_active,
+        total_seats=room.total_seats,
+        is_in_use=is_in_use,
+        current_showtime=current_showtime,
+        upcoming_showtimes=upcoming_showtimes,
+    )
+
 
 
 @router.post(
