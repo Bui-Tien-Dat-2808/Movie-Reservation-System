@@ -32,14 +32,28 @@ async def update_me(
         current_user.full_name = data.full_name
     if data.email is not None:
         # Check uniqueness
-        from sqlalchemy import select
         existing = await db.execute(
             select(User).where(User.email == data.email, User.id != current_user.id)
         )
         if existing.scalar_one_or_none():
             from app.core.exceptions import ConflictException
-            raise ConflictException("Email is already in use")
+            raise ConflictException("Email đã được sử dụng bởi tài khoản khác")
         current_user.email = data.email
+    if data.phone_number is not None:
+        existing_phone = await db.execute(
+            select(User).where(User.phone_number == data.phone_number, User.id != current_user.id)
+        )
+        if existing_phone.scalar_one_or_none():
+            from app.core.exceptions import ConflictException
+            raise ConflictException("Số điện thoại đã được sử dụng bởi tài khoản khác")
+        current_user.phone_number = data.phone_number
+    if data.date_of_birth is not None:
+        current_user.date_of_birth = data.date_of_birth
+    if data.gender is not None:
+        current_user.gender = data.gender
+    if data.region is not None:
+        current_user.region = data.region
+
     await db.flush()
     await db.refresh(current_user)
     return current_user

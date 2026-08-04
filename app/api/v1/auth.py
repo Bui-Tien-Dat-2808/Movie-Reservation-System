@@ -1,8 +1,8 @@
 import structlog
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_current_user, get_db, get_redis, bearer_scheme
+from app.dependencies import bearer_scheme, get_current_user, get_db, get_redis
 from app.schemas.auth import (
     AccessTokenResponse,
     LoginRequest,
@@ -18,6 +18,29 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = structlog.get_logger()
 
 
+async def check_rate_limit(redis_client, key: str, max_requests: int = 5, window_seconds: int = 60):
+    """
+    Rate limit helper enforcing max_requests per window_seconds using Redis.
+    Safely skips if redis_client is mock or unavailable.
+    """
+    if not redis_client:
+        return
+    try:
+        current = await redis_client.get(key)
+        if current and not callable(current) and isinstance(current, (str, bytes, int)):
+            if int(current) >= max_requests:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Quá nhiều yêu cầu đăng nhập/đăng ký. Vui lòng thử lại sau 1 phút.",
+                )
+        await redis_client.incr(key)
+        await redis_client.expire(key, window_seconds)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Rate limit check skipped/failed", error=str(e))
+
+
 @router.post(
     "/register",
     response_model=UserResponse,
@@ -29,7 +52,8 @@ async def register(
     db: AsyncSession = Depends(get_db),
     redis=Depends(get_redis),
 ):
-    """Register a new user account."""
+    """Register a new user account with rate limiting."""
+    await check_rate_limit(redis, f"ratelimit:register:{data.email}")
     service = AuthService(db, CacheService(redis))
     user = await service.register(data)
     return user
@@ -50,6 +74,7 @@ async def login(
     - **access_token**: short-lived JWT (30 min)
     - **refresh_token**: long-lived token (7 days)
     """
+    await check_rate_limit(redis, f"ratelimit:login:{data.account}")
     service = AuthService(db, CacheService(redis))
     return await service.login(data)
 

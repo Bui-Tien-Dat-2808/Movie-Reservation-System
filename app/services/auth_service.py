@@ -32,15 +32,27 @@ class AuthService:
 
     async def register(self, data: UserCreate) -> User:
         """Register a new user."""
+        from sqlalchemy import or_
+
         # Check email uniqueness
         result = await self.db.execute(select(User).where(User.email == data.email))
         if result.scalar_one_or_none():
-            raise ConflictException(f"Email '{data.email}' is already registered")
+            raise ConflictException(f"Email '{data.email}' đã được đăng ký")
+
+        # Check phone uniqueness if provided
+        if data.phone_number:
+            phone_res = await self.db.execute(select(User).where(User.phone_number == data.phone_number))
+            if phone_res.scalar_one_or_none():
+                raise ConflictException(f"Số điện thoại '{data.phone_number}' đã được đăng ký")
 
         user = User(
             email=data.email,
+            phone_number=data.phone_number,
             hashed_password=get_password_hash(data.password),
             full_name=data.full_name,
+            date_of_birth=data.date_of_birth,
+            gender=data.gender,
+            region=data.region,
             role=UserRole.USER,
             is_active=True,
         )
@@ -51,8 +63,17 @@ class AuthService:
         return user
 
     async def login(self, data: LoginRequest) -> TokenResponse:
-        """Authenticate user and return tokens."""
-        result = await self.db.execute(select(User).where(User.email == data.email))
+        """Authenticate user by email OR phone_number and return tokens."""
+        from sqlalchemy import or_
+
+        result = await self.db.execute(
+            select(User).where(
+                or_(
+                    User.email == data.account,
+                    User.phone_number == data.account,
+                )
+            )
+        )
         user = result.scalar_one_or_none()
 
         if not user or not verify_password(data.password, user.hashed_password):

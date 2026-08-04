@@ -145,6 +145,16 @@ class ShowtimeService:
                 f"Movie status is '{movie.status.value}' — only 'now_showing' movies are allowed."
             )
 
+        # Validate start_time is not in the past
+        now_utc = datetime.now(timezone.utc)
+        st_start = (
+            data.start_time.replace(tzinfo=timezone.utc)
+            if data.start_time.tzinfo is None
+            else data.start_time.astimezone(timezone.utc)
+        )
+        if st_start < now_utc:
+            raise ValidationException("Cannot create a showtime with start_time in the past")
+
         # Validate room exists
         room_result = await self.db.execute(
             select(Room)

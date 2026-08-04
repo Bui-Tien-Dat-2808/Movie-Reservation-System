@@ -2,6 +2,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from decimal import Decimal
+from datetime import date, datetime, timezone, timedelta
+from app.models.movie import Movie, MovieStatus
 
 
 class TestMovieSchema:
@@ -23,7 +25,7 @@ class TestMovieSchema:
         from app.schemas.movie import MovieCreate
         import pydantic
         with pytest.raises(pydantic.ValidationError):
-            MovieCreate(title="Test", duration_minutes=0)
+            MovieCreate(title="Test", duration_minutes=-5)
 
     def test_duration_too_long(self):
         from app.schemas.movie import MovieCreate
@@ -37,6 +39,80 @@ class TestMovieSchema:
         dumped = update.model_dump(exclude_unset=True)
         assert "title" in dumped
         assert "description" not in dumped
+
+
+class TestMovieAutoStatusTransition:
+    """Test automatic status transitions for movies based on release date and showtimes."""
+
+    @pytest.mark.asyncio
+    async def test_coming_soon_to_now_showing_on_release_date(self):
+        """Test movie in COMING_SOON with past release_date automatically converts to NOW_SHOWING."""
+        from app.services.movie_service import MovieService
+
+        db_mock = AsyncMock()
+        cache_mock = MagicMock()
+        service = MovieService(db_mock, cache_mock)
+
+        past_movie = Movie(
+            id=1,
+            title="Released Movie",
+            status=MovieStatus.COMING_SOON,
+            release_date=date.today() - timedelta(days=5),
+            is_active=True
+        )
+
+        st_result = MagicMock()
+        st_result.scalars().all.return_value = []
+
+        fut_result = MagicMock()
+        fut_result.scalars().all.return_value = []
+
+        cs_result = MagicMock()
+        cs_result.scalars().all.return_value = [past_movie]
+
+        ns_result = MagicMock()
+        ns_result.scalars().all.return_value = []
+
+        db_mock.execute.side_effect = [st_result, fut_result, cs_result, ns_result]
+
+        await service.auto_update_movie_statuses()
+
+        assert past_movie.status == MovieStatus.NOW_SHOWING
+
+    @pytest.mark.asyncio
+    async def test_now_showing_to_ended_when_all_showtimes_past(self):
+        """Test movie in NOW_SHOWING with only past showtimes converts to ENDED."""
+        from app.services.movie_service import MovieService
+
+        db_mock = AsyncMock()
+        cache_mock = MagicMock()
+        service = MovieService(db_mock, cache_mock)
+
+        showing_movie = Movie(
+            id=2,
+            title="Finished Movie",
+            status=MovieStatus.NOW_SHOWING,
+            release_date=date.today() - timedelta(days=30),
+            is_active=True
+        )
+
+        st_result = MagicMock()
+        st_result.scalars().all.return_value = [2]  # Has showtimes
+
+        fut_result = MagicMock()
+        fut_result.scalars().all.return_value = []  # No future showtimes
+
+        cs_result = MagicMock()
+        cs_result.scalars().all.return_value = []
+
+        ns_result = MagicMock()
+        ns_result.scalars().all.return_value = [showing_movie]
+
+        db_mock.execute.side_effect = [st_result, fut_result, cs_result, ns_result]
+
+        await service.auto_update_movie_statuses()
+
+        assert showing_movie.status == MovieStatus.ENDED
 
 
 class TestShowtimeSchema:

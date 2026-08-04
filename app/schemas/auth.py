@@ -1,9 +1,19 @@
-from pydantic import BaseModel, EmailStr
+from typing import Optional
+from pydantic import BaseModel, model_validator
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    account: Optional[str] = None  # Email or Phone number
+    email: Optional[str] = None
     password: str
+
+    @model_validator(mode="after")
+    def validate_account(self):
+        if not self.account and self.email:
+            self.account = self.email
+        if not self.account:
+            raise ValueError("account or email field is required for login")
+        return self
 
 
 class TokenResponse(BaseModel):

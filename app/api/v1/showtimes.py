@@ -82,7 +82,6 @@ async def get_showtime(
 async def get_seat_map(
     showtime_id: int,
     service: ShowtimeService = Depends(get_showtime_service),
-    _=Depends(get_current_active_user),
 ):
     """
     Get the full seat availability map for a showtime.

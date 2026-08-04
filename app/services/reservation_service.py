@@ -80,8 +80,8 @@ class ReservationService:
             if not is_valid_hold:
                 raise SeatUnavailableException([ss.seat_id])
 
-        # Calculate total price
-        total_price = Decimal("0")
+        # Calculate total price (subtotal)
+        subtotal = Decimal("0")
         seat_prices = {}
 
         # Load seats to get types
@@ -94,13 +94,29 @@ class ReservationService:
             else:
                 price = showtime.base_price
             seat_prices[ss.id] = price
-            total_price += price
+            subtotal += price
+
+        # Process voucher discount if provided
+        voucher_code = None
+        discount_amount = Decimal("0.00")
+        final_total = subtotal
+
+        if data.voucher_code:
+            from app.services.voucher_service import VoucherService
+            match, disc_val, final_val = VoucherService.validate_and_calculate_discount(
+                data.voucher_code, float(subtotal)
+            )
+            voucher_code = match.code
+            discount_amount = Decimal(str(round(disc_val, 2)))
+            final_total = Decimal(str(round(final_val, 2)))
 
         # Create reservation
         reservation = Reservation(
             user_id=user_id,
             showtime_id=data.showtime_id,
-            total_price=total_price,
+            total_price=final_total,
+            voucher_code=voucher_code,
+            discount_amount=discount_amount,
             status=ReservationStatus.CONFIRMED,
         )
         self.db.add(reservation)
@@ -142,7 +158,7 @@ class ReservationService:
             "Reservation created",
             reservation_id=reservation.id,
             user_id=user_id,
-            total_price=str(total_price),
+            total_price=str(final_total),
         )
         return full_reservation
 

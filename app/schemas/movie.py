@@ -11,10 +11,11 @@ class MovieBase(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     description: Optional[str] = None
     poster_url: Optional[str] = None
-    duration_minutes: Optional[int] = Field(None, gt=0, le=600)
+    duration_minutes: Optional[int] = Field(None, ge=0, le=600)
     release_date: Optional[date] = None
     language: Optional[str] = Field(None, max_length=100)
     rating: Optional[str] = Field(None, max_length=10)
+    director: Optional[str] = Field(None, max_length=255)
     status: MovieStatus = MovieStatus.NOW_SHOWING
 
 
@@ -27,10 +28,11 @@ class MovieUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=500)
     description: Optional[str] = None
     poster_url: Optional[str] = None
-    duration_minutes: Optional[int] = Field(None, gt=0, le=600)
+    duration_minutes: Optional[int] = Field(None, ge=0, le=600)
     release_date: Optional[date] = None
     language: Optional[str] = None
     rating: Optional[str] = None
+    director: Optional[str] = None
     status: Optional[MovieStatus] = None
     genre_ids: Optional[List[int]] = None
 
@@ -49,9 +51,12 @@ class MovieResponse(MovieBase):
 class MovieListResponse(BaseModel):
     id: int
     title: str
+    description: Optional[str]
     poster_url: Optional[str]
     duration_minutes: Optional[int]
     release_date: Optional[date]
+    rating: Optional[str]
+    director: Optional[str]
     status: MovieStatus
     genres: List[GenreResponse] = []
     created_at: datetime

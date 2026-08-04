@@ -40,6 +40,7 @@ class Movie(Base):
     release_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     language: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     rating: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # e.g. PG-13
+    director: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     tmdb_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True, index=True)
     status: Mapped[MovieStatus] = mapped_column(
         Enum(MovieStatus), default=MovieStatus.NOW_SHOWING, nullable=False

@@ -19,11 +19,82 @@ logger = structlog.get_logger()
 CACHE_KEY_MOVIES = "movies:list"
 CACHE_KEY_MOVIE = "movies:detail:{id}"
 
+GENRE_MAP_VIETNAMESE = {
+    "action": "Hành Động",
+    "adventure": "Phiêu Lưu",
+    "animation": "Hoạt Hình",
+    "comedy": "Hài",
+    "crime": "Hình Sự",
+    "documentary": "Tài Liệu",
+    "drama": "Chính Kịch",
+    "family": "Gia Đình",
+    "fantasy": "Giả Tượng",
+    "history": "Lịch Sử",
+    "horror": "Kinh Dị",
+    "music": "Âm Nhạc",
+    "mystery": "Bí Ẩn",
+    "romance": "Lãng Mạn",
+    "science fiction": "Khoa Học Viễn Tưởng",
+    "sci-fi": "Khoa Học Viễn Tưởng",
+    "tv movie": "Phim Truyền Hình",
+    "thriller": "Gây Cấn",
+    "war": "Chiến Tranh",
+    "western": "Miền Tây",
+}
+
+
+def normalize_genre_name(raw_name: str) -> str:
+    cleaned = raw_name.strip()
+    if cleaned.lower().startswith("phim "):
+        cleaned = cleaned[5:].strip()
+    return GENRE_MAP_VIETNAMESE.get(cleaned.lower(), cleaned.title())
+
 
 class MovieService:
     def __init__(self, db: AsyncSession, cache: CacheService):
         self.db = db
         self.cache = cache
+
+    async def auto_update_movie_statuses(self) -> None:
+        """
+        Efficiently update movie statuses using set operations (4 SQL queries total).
+        """
+        from datetime import date, datetime, timedelta, timezone
+        from app.models.showtime import Showtime
+
+        today = date.today()
+        now_utc = datetime.now(timezone.utc)
+        cutoff_date = today - timedelta(days=30)
+
+        # 1. Fetch movie_ids that have ANY showtimes and movie_ids with FUTURE showtimes in 2 queries
+        st_res = await self.db.execute(select(Showtime.movie_id).distinct())
+        all_showtime_movie_ids = set(st_res.scalars().all())
+
+        fut_res = await self.db.execute(
+            select(Showtime.movie_id).where(Showtime.start_time >= now_utc).distinct()
+        )
+        future_showtime_movie_ids = set(fut_res.scalars().all())
+
+        # 2. Update COMING_SOON movies
+        cs_res = await self.db.execute(
+            select(Movie).where(Movie.status == MovieStatus.COMING_SOON, Movie.is_active == True)
+        )
+        for m in cs_res.scalars().all():
+            has_st = m.id in all_showtime_movie_ids
+            if (m.release_date and m.release_date <= today) or has_st:
+                m.status = MovieStatus.NOW_SHOWING
+            elif m.release_date and m.release_date < cutoff_date and not has_st:
+                m.status = MovieStatus.ENDED
+
+        # 3. Update NOW_SHOWING movies (if has showtimes but no future showtime -> ENDED)
+        ns_res = await self.db.execute(
+            select(Movie).where(Movie.status == MovieStatus.NOW_SHOWING, Movie.is_active == True)
+        )
+        for m in ns_res.scalars().all():
+            if m.id in all_showtime_movie_ids and m.id not in future_showtime_movie_ids:
+                m.status = MovieStatus.ENDED
+
+        await self.db.flush()
 
     async def get_movies(
         self,
@@ -32,7 +103,9 @@ class MovieService:
         search: Optional[str] = None,
         status: Optional[MovieStatus] = None,
     ) -> tuple[List[Movie], int]:
-        """List movies with filtering and pagination."""
+        """List movies with filtering and pagination after auto-updating statuses."""
+        await self.auto_update_movie_statuses()
+
         query = select(Movie).where(Movie.is_active == True)
 
         if status:
@@ -155,11 +228,23 @@ class MovieService:
         result = await self.db.execute(select(Movie).where(Movie.tmdb_id == tmdb_id))
         movie = result.scalar_one_or_none()
 
+        # Fallback poster lookup if primary TMDB poster_url is empty
+        poster_url = tmdb_data.get("poster_url")
+        if not poster_url and tmdb_data.get("title"):
+            try:
+                search_res = await tmdb_service.search_movies(tmdb_data["title"])
+                for item in search_res.get("results", []):
+                    if item.get("poster_url"):
+                        poster_url = item["poster_url"]
+                        break
+            except Exception as e:
+                logger.warning("Poster fallback search failed", title=tmdb_data["title"], error=str(e))
+
         if movie:
             # Update existing
             movie.title = tmdb_data["title"]
             movie.description = tmdb_data.get("overview")
-            movie.poster_url = tmdb_data.get("poster_url")
+            movie.poster_url = poster_url or movie.poster_url
             movie.duration_minutes = tmdb_data.get("runtime")
             movie.release_date = tmdb_data.get("release_date")
             movie.language = tmdb_data.get("original_language")
@@ -168,7 +253,7 @@ class MovieService:
             movie = Movie(
                 title=tmdb_data["title"],
                 description=tmdb_data.get("overview"),
-                poster_url=tmdb_data.get("poster_url"),
+                poster_url=poster_url,
                 duration_minutes=tmdb_data.get("runtime"),
                 release_date=tmdb_data.get("release_date"),
                 language=tmdb_data.get("original_language"),
@@ -178,17 +263,18 @@ class MovieService:
             self.db.add(movie)
             await self.db.flush()
 
-        # Sync genres — use case-insensitive get-or-create to avoid UniqueViolation
+        # Sync genres — map English/prefixed genre names to Vietnamese
         genre_names = tmdb_data.get("genres", [])
         genre_ids = []
-        for genre_name in genre_names:
+        for raw_genre in genre_names:
+            normalized_name = normalize_genre_name(raw_genre)
             # Case-insensitive lookup to prevent duplicates
             result = await self.db.execute(
-                select(Genre).where(func.lower(Genre.name) == genre_name.lower())
+                select(Genre).where(func.lower(Genre.name) == normalized_name.lower())
             )
             genre = result.scalar_one_or_none()
             if not genre:
-                genre = Genre(name=genre_name)
+                genre = Genre(name=normalized_name)
                 self.db.add(genre)
                 try:
                     await self.db.flush()
@@ -196,7 +282,7 @@ class MovieService:
                     # Another concurrent request inserted the same genre — fetch it
                     await self.db.rollback()
                     result = await self.db.execute(
-                        select(Genre).where(func.lower(Genre.name) == genre_name.lower())
+                        select(Genre).where(func.lower(Genre.name) == normalized_name.lower())
                     )
                     genre = result.scalar_one_or_none()
                     if not genre:

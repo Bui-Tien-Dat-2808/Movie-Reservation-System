@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     TMDB_API_KEY: str = ""
     TMDB_BASE_URL: str = "https://api.themoviedb.org/3"
     TMDB_IMAGE_BASE_URL: str = "https://image.tmdb.org/t/p/w500"
+    TMDB_REGION: str = "VN"
+    TMDB_LANGUAGE: str = "vi-VN"
 
     # CORS
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:8080"

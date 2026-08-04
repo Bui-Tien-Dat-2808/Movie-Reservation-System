@@ -22,6 +22,7 @@ async def init_db() -> None:
     await _seed_admin()
     await _seed_rooms()
     await _seed_tmdb_movies()
+    await _seed_showtimes()
     logger.info("Database initialized successfully")
 
 
@@ -125,3 +126,85 @@ async def _seed_tmdb_movies() -> None:
             logger.info("TMDB Movie seeding completed successfully")
         except Exception as e:
             logger.error("Failed to fetch popular movies from TMDB API", error=str(e))
+
+
+async def _seed_showtimes() -> None:
+    """Seed initial showtimes for existing movies if showtimes table is empty."""
+    from datetime import datetime, timedelta, timezone, time
+    from decimal import Decimal
+    from app.models.movie import Movie, MovieStatus
+    from app.models.room import Room
+    from app.models.showtime import Showtime, ShowtimeStatus
+    from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Showtime))
+        if result.scalars().first():
+            logger.info("Showtimes already exist, skipping showtime seeding")
+            return
+
+        movies_res = await db.execute(select(Movie).where(Movie.status == MovieStatus.NOW_SHOWING))
+        movies = list(movies_res.scalars().all())
+        if not movies:
+            logger.info("No movies found to create showtimes for")
+            return
+
+        rooms_res = await db.execute(select(Room))
+        rooms = list(rooms_res.scalars().all())
+        if not rooms:
+            logger.info("No rooms found to create showtimes in")
+            return
+
+        # Template showtime slots (hour, minute, room index, price, type label)
+        time_slots = [
+            (10, 30, 0, Decimal("150000")), # 10:30 Room 1 (IMAX)
+            (13, 15, 1, Decimal("120000")), # 13:15 Room 2 (3D)
+            (16, 00, 2, Decimal("85000")),  # 16:00 Room 3 (Standard)
+            (19, 30, 0, Decimal("180000")), # 19:30 Room 1 (IMAX)
+            (22, 15, 3, Decimal("200000")), # 22:15 Room 4 (VIP)
+        ]
+
+        now = datetime.now(timezone.utc)
+        count = 0
+
+        # Seed showtimes for today and next 6 days
+        for day_offset in range(7):
+            show_date = now.date() + timedelta(days=day_offset)
+
+            for idx, movie in enumerate(movies):
+                # Distribute slots across movies
+                slot_hour, slot_min, room_idx, price = time_slots[(idx + day_offset) % len(time_slots)]
+                target_room = rooms[room_idx % len(rooms)]
+
+                start_dt = datetime.combine(show_date, time(hour=slot_hour, minute=slot_min), tzinfo=timezone.utc)
+                duration = movie.duration_minutes or 120
+                end_dt = start_dt + timedelta(minutes=duration)
+
+                st = Showtime(
+                    movie_id=movie.id,
+                    room_id=target_room.id,
+                    start_time=start_dt,
+                    end_time=end_dt,
+                    base_price=price,
+                    vip_price=price * Decimal("1.25"),
+                    status=ShowtimeStatus.SCHEDULED,
+                )
+                db.add(st)
+                await db.flush()
+
+                # Generate seats for showtime
+                # Load room seats
+                await db.refresh(target_room, attribute_names=["seats"])
+                for seat in target_room.seats:
+                    if seat.is_active:
+                        ss = ShowtimeSeat(
+                            showtime_id=st.id,
+                            seat_id=seat.id,
+                            status=SeatStatus.AVAILABLE,
+                        )
+                        db.add(ss)
+                count += 1
+
+        await db.commit()
+        logger.info("Successfully seeded showtimes", total_showtimes=count)
+

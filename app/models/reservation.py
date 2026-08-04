@@ -24,6 +24,8 @@ class Reservation(Base):
         Integer, ForeignKey("showtimes.id", ondelete="CASCADE"), nullable=False
     )
     total_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=0)
+    voucher_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     status: Mapped[ReservationStatus] = mapped_column(
         Enum(ReservationStatus), default=ReservationStatus.CONFIRMED, nullable=False
     )

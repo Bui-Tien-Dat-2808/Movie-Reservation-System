@@ -9,6 +9,10 @@ from app.models.user import UserRole
 class UserBase(BaseModel):
     email: EmailStr
     full_name: str = Field(..., min_length=2, max_length=255)
+    phone_number: Optional[str] = Field(None, max_length=50)
+    date_of_birth: Optional[str] = Field(None, max_length=50)
+    gender: Optional[str] = Field(None, max_length=20)
+    region: Optional[str] = Field(None, max_length=100)
 
 
 class UserCreate(UserBase):
@@ -27,6 +31,10 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     full_name: Optional[str] = Field(None, min_length=2, max_length=255)
     email: Optional[EmailStr] = None
+    phone_number: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    gender: Optional[str] = None
+    region: Optional[str] = None
 
 
 class UserResponse(UserBase):
@@ -43,6 +51,7 @@ class UserListResponse(BaseModel):
     id: int
     email: str
     full_name: str
+    phone_number: Optional[str] = None
     role: UserRole
     is_active: bool
     created_at: datetime

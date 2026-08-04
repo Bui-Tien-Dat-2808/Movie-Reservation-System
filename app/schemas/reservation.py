@@ -34,6 +34,7 @@ class ReservationSeatResponse(BaseModel):
 class ReservationCreate(BaseModel):
     showtime_id: int
     seat_ids: List[int] = Field(..., min_length=1, max_length=10)
+    voucher_code: Optional[str] = None
 
 
 class ReservationResponse(BaseModel):
@@ -41,6 +42,8 @@ class ReservationResponse(BaseModel):
     showtime_id: int
     user_id: int
     total_price: Decimal
+    voucher_code: Optional[str] = None
+    discount_amount: Decimal = Decimal("0.00")
     status: ReservationStatus
     notes: Optional[str] = None
     reservation_seats: List[ReservationSeatResponse] = []
@@ -54,6 +57,8 @@ class ReservationListResponse(BaseModel):
     id: int
     showtime_id: int
     total_price: Decimal
+    voucher_code: Optional[str] = None
+    discount_amount: Decimal = Decimal("0.00")
     status: ReservationStatus
     seat_count: int = 0
     showtime: Optional[ShowtimeSummary] = None
