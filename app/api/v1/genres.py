@@ -15,6 +15,9 @@ router = APIRouter(prefix="/genres", tags=["Genres"])
 logger = structlog.get_logger()
 
 
+from app.utils.genre_utils import normalize_genre_name
+
+
 @router.get("/", response_model=List[GenreResponse], summary="List all genres")
 async def list_genres(db: AsyncSession = Depends(get_db)):
     """Get all genres (cached)."""
@@ -44,12 +47,15 @@ async def create_genre(
     _=Depends(require_admin),
 ):
     """Admin: create a new genre."""
-    existing = await db.execute(select(Genre).where(Genre.name == data.name))
+    normalized_name = normalize_genre_name(data.name)
+    existing = await db.execute(
+        select(Genre).where(func.lower(Genre.name) == normalized_name.lower())
+    )
     if existing.scalar_one_or_none():
         from app.core.exceptions import ConflictException
-        raise ConflictException(f"Genre '{data.name}' already exists")
+        raise ConflictException(f"Genre '{normalized_name}' already exists")
 
-    genre = Genre(name=data.name, description=data.description)
+    genre = Genre(name=normalized_name, description=data.description)
     db.add(genre)
     await db.flush()
     await db.refresh(genre)
@@ -71,7 +77,18 @@ async def update_genre(
         raise NotFoundException("Genre", genre_id)
 
     if data.name is not None:
-        genre.name = data.name
+        normalized_name = normalize_genre_name(data.name)
+        existing = await db.execute(
+            select(Genre).where(
+                func.lower(Genre.name) == normalized_name.lower(),
+                Genre.id != genre_id,
+            )
+        )
+        if existing.scalar_one_or_none():
+            from app.core.exceptions import ConflictException
+            raise ConflictException(f"Genre '{normalized_name}' already exists")
+        genre.name = normalized_name
+
     if data.description is not None:
         genre.description = data.description
 

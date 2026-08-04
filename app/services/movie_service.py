@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 import structlog
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,38 +16,10 @@ from app.utils.pagination import PaginationParams
 
 logger = structlog.get_logger()
 
+from app.utils.genre_utils import normalize_genre_name
+
 CACHE_KEY_MOVIES = "movies:list"
 CACHE_KEY_MOVIE = "movies:detail:{id}"
-
-GENRE_MAP_VIETNAMESE = {
-    "action": "Hành Động",
-    "adventure": "Phiêu Lưu",
-    "animation": "Hoạt Hình",
-    "comedy": "Hài",
-    "crime": "Hình Sự",
-    "documentary": "Tài Liệu",
-    "drama": "Chính Kịch",
-    "family": "Gia Đình",
-    "fantasy": "Giả Tượng",
-    "history": "Lịch Sử",
-    "horror": "Kinh Dị",
-    "music": "Âm Nhạc",
-    "mystery": "Bí Ẩn",
-    "romance": "Lãng Mạn",
-    "science fiction": "Khoa Học Viễn Tưởng",
-    "sci-fi": "Khoa Học Viễn Tưởng",
-    "tv movie": "Phim Truyền Hình",
-    "thriller": "Gây Cấn",
-    "war": "Chiến Tranh",
-    "western": "Miền Tây",
-}
-
-
-def normalize_genre_name(raw_name: str) -> str:
-    cleaned = raw_name.strip()
-    if cleaned.lower().startswith("phim "):
-        cleaned = cleaned[5:].strip()
-    return GENRE_MAP_VIETNAMESE.get(cleaned.lower(), cleaned.title())
 
 
 class MovieService:
@@ -55,21 +27,20 @@ class MovieService:
         self.db = db
         self.cache = cache
 
-    async def auto_update_movie_statuses(self) -> None:
+    async def auto_update_movie_statuses(self) -> int:
         """
         Efficiently update movie statuses using set operations (4 SQL queries total).
+        Returns the number of movie status changes.
         """
         from datetime import date, datetime, timedelta, timezone
         from app.models.showtime import Showtime
 
         today = date.today()
         now_utc = datetime.now(timezone.utc)
-        cutoff_date = today - timedelta(days=30)
+        cutoff_date = today - timedelta(days=60)
+        changes = 0
 
-        # 1. Fetch movie_ids that have ANY showtimes and movie_ids with FUTURE showtimes in 2 queries
-        st_res = await self.db.execute(select(Showtime.movie_id).distinct())
-        all_showtime_movie_ids = set(st_res.scalars().all())
-
+        # 1. Fetch movie_ids with FUTURE showtimes
         fut_res = await self.db.execute(
             select(Showtime.movie_id).where(Showtime.start_time >= now_utc).distinct()
         )
@@ -80,21 +51,41 @@ class MovieService:
             select(Movie).where(Movie.status == MovieStatus.COMING_SOON, Movie.is_active == True)
         )
         for m in cs_res.scalars().all():
-            has_st = m.id in all_showtime_movie_ids
-            if (m.release_date and m.release_date <= today) or has_st:
+            has_future_st = m.id in future_showtime_movie_ids
+            old_status = m.status
+            if (m.release_date and m.release_date <= today) or has_future_st:
                 m.status = MovieStatus.NOW_SHOWING
-            elif m.release_date and m.release_date < cutoff_date and not has_st:
+            elif m.release_date and m.release_date < cutoff_date and not has_future_st:
                 m.status = MovieStatus.ENDED
 
-        # 3. Update NOW_SHOWING movies (if has showtimes but no future showtime -> ENDED)
+            if m.status != old_status:
+                changes += 1
+
+        # 3. Update NOW_SHOWING movies
         ns_res = await self.db.execute(
             select(Movie).where(Movie.status == MovieStatus.NOW_SHOWING, Movie.is_active == True)
         )
         for m in ns_res.scalars().all():
-            if m.id in all_showtime_movie_ids and m.id not in future_showtime_movie_ids:
+            has_future_st = m.id in future_showtime_movie_ids
+            is_old_release = m.release_date and m.release_date < cutoff_date
+            old_status = m.status
+
+            # Convert to ENDED ONLY if there are no future showtimes left AND release_date is older than 60 days
+            if not has_future_st and is_old_release:
                 m.status = MovieStatus.ENDED
 
+            if m.status != old_status:
+                changes += 1
+
         await self.db.flush()
+        if changes > 0 and self.cache:
+            try:
+                res = self.cache.delete_pattern(f"{CACHE_KEY_MOVIES}*")
+                if hasattr(res, "__await__"):
+                    await res
+            except Exception:
+                pass
+        return changes
 
     async def get_movies(
         self,
@@ -103,7 +94,54 @@ class MovieService:
         search: Optional[str] = None,
         status: Optional[MovieStatus] = None,
     ) -> tuple[List[Movie], int]:
-        """List movies with filtering and pagination after auto-updating statuses."""
+        """List movies with filtering and pagination (Redis cached)."""
+        from datetime import date, datetime, timezone
+
+        status_str = status.value if status else "all"
+        cache_key = f"{CACHE_KEY_MOVIES}:{status_str}:{genre_id or 0}:{search or ''}:{pagination.page}:{pagination.page_size}"
+
+        # 1. Try Redis cache first
+        cached = await self.cache.get(cache_key)
+        if cached and isinstance(cached, dict):
+            items_data = cached.get("items", [])
+            total = cached.get("total", 0)
+            movies = []
+            now_now = datetime.now(timezone.utc)
+            for item in items_data:
+                m = Movie(
+                    id=item["id"],
+                    title=item["title"],
+                    description=item.get("description"),
+                    poster_url=item.get("poster_url"),
+                    duration_minutes=item.get("duration_minutes"),
+                    release_date=date.fromisoformat(item["release_date"]) if item.get("release_date") else None,
+                    language=item.get("language"),
+                    tmdb_id=item.get("tmdb_id"),
+                    status=MovieStatus(item["status"]) if item.get("status") else MovieStatus.NOW_SHOWING,
+                    rating=item.get("rating"),
+                    director=item.get("director"),
+                    is_active=item.get("is_active", True),
+                    created_at=datetime.fromisoformat(item["created_at"]) if item.get("created_at") else now_now,
+                    updated_at=datetime.fromisoformat(item["updated_at"]) if item.get("updated_at") else now_now,
+                )
+                m.movie_genres = []
+                for g_item in item.get("genres", []):
+                    g = Genre(
+                        id=g_item["id"],
+                        name=g_item["name"],
+                        description=g_item.get("description"),
+                        created_at=datetime.fromisoformat(g_item["created_at"]) if g_item.get("created_at") else now_now,
+                    )
+                    mg = MovieGenre(
+                        movie_id=item["id"],
+                        genre_id=g_item["id"],
+                        genre=g,
+                    )
+                    m.movie_genres.append(mg)
+                movies.append(m)
+            return movies, total
+
+        # 2. On Cache Miss: Auto update statuses & Query DB
         await self.auto_update_movie_statuses()
 
         query = select(Movie).where(Movie.is_active == True)
@@ -123,9 +161,45 @@ class MovieService:
         query = query.offset(pagination.offset).limit(pagination.limit)
         query = query.options(selectinload(Movie.movie_genres).selectinload(MovieGenre.genre))
         result = await self.db.execute(query)
-        movies = result.scalars().all()
+        movies = list(result.scalars().all())
 
-        return list(movies), total
+        # 3. Store in Redis Cache (TTL = 300s)
+        now_utc = datetime.now(timezone.utc)
+        cache_data = {
+            "total": total,
+            "items": [
+                {
+                    "id": m.id,
+                    "title": m.title,
+                    "description": m.description,
+                    "poster_url": m.poster_url,
+                    "duration_minutes": m.duration_minutes,
+                    "release_date": m.release_date.isoformat() if m.release_date else None,
+                    "language": m.language,
+                    "tmdb_id": m.tmdb_id,
+                    "status": m.status.value,
+                    "rating": m.rating,
+                    "director": m.director,
+                    "is_active": m.is_active,
+                    "created_at": m.created_at.isoformat() if getattr(m, "created_at", None) else now_utc.isoformat(),
+                    "updated_at": m.updated_at.isoformat() if getattr(m, "updated_at", None) else now_utc.isoformat(),
+                    "genres": [
+                        {
+                            "id": mg.genre.id,
+                            "name": mg.genre.name,
+                            "description": getattr(mg.genre, "description", None),
+                            "created_at": mg.genre.created_at.isoformat() if getattr(mg.genre, "created_at", None) else now_utc.isoformat(),
+                        }
+                        for mg in m.movie_genres
+                        if mg.genre
+                    ],
+                }
+                for m in movies
+            ],
+        }
+        await self.cache.set(cache_key, cache_data, ttl=300)
+
+        return movies, total
 
     async def get_movie(self, movie_id: int) -> Movie:
         """Get single movie by ID (supports local ID and TMDB ID with dynamic auto-sync)."""

@@ -104,7 +104,7 @@ class TestGenresCRUD:
             "description": "Action movies",
         }, headers=headers)
         assert response.status_code == 201
-        assert response.json()["name"] == "Action"
+        assert response.json()["name"] == "Hành Động"
 
     async def test_create_duplicate_genre(self, client: AsyncClient, test_admin):
         headers = get_auth_headers(test_admin)
@@ -275,10 +275,10 @@ class TestShowtimeCRUD:
         assert data["room_id"] == room_id
         assert data["status"] == "scheduled"
 
-    async def test_create_showtime_for_coming_soon_movie_fails(
+    async def test_create_showtime_for_coming_soon_movie_succeeds(
         self, client: AsyncClient, test_admin
     ):
-        """Showtime creation should be rejected for a coming_soon movie (422)."""
+        """Showtime creation succeeds for a coming_soon movie (pre-sales)."""
         headers = get_auth_headers(test_admin)
         movie_id = await self._create_movie(client, headers, "coming_soon", "Upcoming Movie")
         room_id = await self._create_room(client, headers, "Room B1")
@@ -288,9 +288,7 @@ class TestShowtimeCRUD:
             json=self._showtime_payload(movie_id, room_id),
             headers=headers,
         )
-        assert resp.status_code == 422
-        data = resp.json()
-        assert "now_showing" in data["detail"].lower()
+        assert resp.status_code == 201
 
     async def test_create_showtime_for_ended_movie_fails(
         self, client: AsyncClient, test_admin
@@ -307,7 +305,49 @@ class TestShowtimeCRUD:
         )
         assert resp.status_code == 422
         data = resp.json()
-        assert "now_showing" in data["detail"].lower()
+        assert "now_showing" in data["detail"].lower() or "coming_soon" in data["detail"].lower()
+
+    async def test_update_showtime_conflict_fails(
+        self, client: AsyncClient, test_admin
+    ):
+        """Updating showtime A to overlap showtime B in same room raises 409 Conflict."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "now_showing", "Conflict Movie")
+        room_id = await self._create_room(client, headers, "Room D1")
+
+        # Showtime 1: Day 3, 10:00 -> 12:00
+        start1 = (datetime.now(timezone.utc) + timedelta(days=3)).replace(hour=10, minute=0, second=0).isoformat()
+        end1 = (datetime.now(timezone.utc) + timedelta(days=3)).replace(hour=12, minute=0, second=0).isoformat()
+
+        res1 = await client.post("/api/v1/showtimes/", json={
+            "movie_id": movie_id, "room_id": room_id,
+            "start_time": start1, "end_time": end1,
+            "base_price": "90000.0", "vip_price": "120000.0"
+        }, headers=headers)
+        assert res1.status_code == 201
+
+        # Showtime 2: Day 3, 14:00 -> 16:00
+        start2 = (datetime.now(timezone.utc) + timedelta(days=3)).replace(hour=14, minute=0, second=0).isoformat()
+        end2 = (datetime.now(timezone.utc) + timedelta(days=3)).replace(hour=16, minute=0, second=0).isoformat()
+
+        res2 = await client.post("/api/v1/showtimes/", json={
+            "movie_id": movie_id, "room_id": room_id,
+            "start_time": start2, "end_time": end2,
+            "base_price": "90000.0", "vip_price": "120000.0"
+        }, headers=headers)
+        assert res2.status_code == 201
+        st2_id = res2.json()["id"]
+
+        # Try to update Showtime 2 to overlap Showtime 1 (11:00 -> 13:00)
+        overlap_start = (datetime.now(timezone.utc) + timedelta(days=3)).replace(hour=11, minute=0, second=0).isoformat()
+        overlap_end = (datetime.now(timezone.utc) + timedelta(days=3)).replace(hour=13, minute=0, second=0).isoformat()
+
+        upd_res = await client.put(f"/api/v1/showtimes/{st2_id}", json={
+            "start_time": overlap_start,
+            "end_time": overlap_end
+        }, headers=headers)
+        assert upd_res.status_code == 409
+        assert "conflict" in upd_res.json()["detail"].lower() or "scheduled" in upd_res.json()["detail"].lower()
 
     async def test_showtime_dynamic_status_transition(
         self, client: AsyncClient, test_admin, db_session: AsyncSession

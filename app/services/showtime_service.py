@@ -16,6 +16,7 @@ from app.models.room import Room
 from app.schemas.showtime import ShowtimeCreate, ShowtimeUpdate
 from app.services.cache_service import CacheService
 from app.utils.pagination import PaginationParams
+from app.utils.datetime_utils import ensure_utc
 
 logger = structlog.get_logger()
 
@@ -26,14 +27,11 @@ class ShowtimeService:
         self.cache = cache
 
     def _apply_lazy_expiration(self, showtime_seats: List[ShowtimeSeat]) -> None:
-        """Dynamically update held seat status in memory if they have expired."""
+        """Lazily expire seats held past held_until."""
         now = datetime.now(timezone.utc)
         for ss in showtime_seats:
             if ss.status == SeatStatus.HELD and ss.held_until:
-                held_until_aware = (
-                    ss.held_until.replace(tzinfo=timezone.utc) if ss.held_until.tzinfo is None
-                    else ss.held_until.astimezone(timezone.utc)
-                )
+                held_until_aware = ensure_utc(ss.held_until)
                 if held_until_aware < now:
                     ss.status = SeatStatus.AVAILABLE
                     ss.held_by = None
@@ -45,16 +43,8 @@ class ShowtimeService:
             return
 
         now = datetime.now(timezone.utc)
-        start = (
-            showtime.start_time.replace(tzinfo=timezone.utc)
-            if showtime.start_time.tzinfo is None
-            else showtime.start_time.astimezone(timezone.utc)
-        )
-        end = (
-            showtime.end_time.replace(tzinfo=timezone.utc)
-            if showtime.end_time.tzinfo is None
-            else showtime.end_time.astimezone(timezone.utc)
-        )
+        start = ensure_utc(showtime.start_time)
+        end = ensure_utc(showtime.end_time)
 
         new_status = None
         if now >= end:
@@ -99,7 +89,7 @@ class ShowtimeService:
             .order_by(Showtime.start_time)
             .options(
                 selectinload(Showtime.movie).selectinload(Movie.movie_genres).selectinload(MovieGenre.genre),
-                selectinload(Showtime.room).selectinload(Room.seats),
+                selectinload(Showtime.room),
                 selectinload(Showtime.showtime_seats),
             )
         )
@@ -138,20 +128,16 @@ class ShowtimeService:
         if not movie or not movie.is_active:
             raise NotFoundException("Movie", data.movie_id)
 
-        # Only allow showtimes for movies that are currently showing
-        if movie.status != MovieStatus.NOW_SHOWING:
+        # Allow showtimes for movies that are currently showing or coming soon
+        if movie.status not in {MovieStatus.NOW_SHOWING, MovieStatus.COMING_SOON}:
             raise ValidationException(
                 f"Cannot create a showtime for this movie. "
-                f"Movie status is '{movie.status.value}' — only 'now_showing' movies are allowed."
+                f"Movie status is '{movie.status.value}' — only 'now_showing' or 'coming_soon' movies are allowed."
             )
 
         # Validate start_time is not in the past
         now_utc = datetime.now(timezone.utc)
-        st_start = (
-            data.start_time.replace(tzinfo=timezone.utc)
-            if data.start_time.tzinfo is None
-            else data.start_time.astimezone(timezone.utc)
-        )
+        st_start = ensure_utc(data.start_time)
         if st_start < now_utc:
             raise ValidationException("Cannot create a showtime with start_time in the past")
 
@@ -186,21 +172,21 @@ class ShowtimeService:
             start_time=data.start_time,
             end_time=data.end_time,
             base_price=data.base_price,
-            vip_price=data.vip_price or data.base_price,
+            vip_price=data.vip_price,
             status=ShowtimeStatus.SCHEDULED,
         )
         self.db.add(showtime)
         await self.db.flush()
 
-        # Generate showtime_seats for all active seats in room
+        # Generate showtime_seats
         for seat in room.seats:
             if seat.is_active:
-                ss = ShowtimeSeat(
+                st_seat = ShowtimeSeat(
                     showtime_id=showtime.id,
                     seat_id=seat.id,
                     status=SeatStatus.AVAILABLE,
                 )
-                self.db.add(ss)
+                self.db.add(st_seat)
 
         await self.db.flush()
         await self.db.refresh(showtime)
@@ -209,10 +195,33 @@ class ShowtimeService:
         return await self.get_showtime(showtime.id)
 
     async def update_showtime(self, showtime_id: int, data: ShowtimeUpdate) -> Showtime:
-        """Update showtime."""
+        """Update showtime with conflict and past-time checks."""
         showtime = await self.get_showtime(showtime_id)
 
         update_data = data.model_dump(exclude_unset=True)
+
+        if "start_time" in update_data or "end_time" in update_data or "room_id" in update_data:
+            new_start = update_data.get("start_time", showtime.start_time)
+            new_end = update_data.get("end_time", showtime.end_time)
+            new_room_id = update_data.get("room_id", showtime.room_id)
+
+            now_utc = datetime.now(timezone.utc)
+            check_start = ensure_utc(new_start)
+            if check_start < now_utc:
+                raise ValidationException("Cannot move a showtime's start_time into the past")
+
+            conflict = await self.db.execute(
+                select(Showtime).where(
+                    Showtime.room_id == new_room_id,
+                    Showtime.id != showtime_id,
+                    Showtime.status != ShowtimeStatus.CANCELLED,
+                    Showtime.start_time < new_end,
+                    Showtime.end_time > new_start,
+                )
+            )
+            if conflict.scalar_one_or_none():
+                raise ConflictException("Room already has a showtime scheduled during this time slot")
+
         for field, value in update_data.items():
             if value is None and field in {"start_time", "end_time", "base_price", "status"}:
                 continue

@@ -18,6 +18,7 @@ from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
 from app.schemas.reservation import ReservationCreate
 from app.services.cache_service import CacheService
+from app.utils.datetime_utils import ensure_utc
 from app.utils.pagination import PaginationParams
 
 logger = structlog.get_logger()
@@ -42,7 +43,7 @@ class ReservationService:
             raise NotFoundException("Showtime", data.showtime_id)
 
         # Ensure showtime is in the future
-        if showtime.start_time.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        if ensure_utc(showtime.start_time) < datetime.now(timezone.utc):
             raise ShowtimePastException()
 
         if showtime.status == ShowtimeStatus.CANCELLED:
@@ -72,10 +73,7 @@ class ReservationService:
                 ss.status == SeatStatus.HELD
                 and ss.held_by == user_id
                 and ss.held_until is not None
-                and (
-                    ss.held_until.replace(tzinfo=timezone.utc) if ss.held_until.tzinfo is None 
-                    else ss.held_until.astimezone(timezone.utc)
-                ) >= now
+                and ensure_utc(ss.held_until) >= now
             )
             if not is_valid_hold:
                 raise SeatUnavailableException([ss.seat_id])
@@ -100,13 +98,15 @@ class ReservationService:
         voucher_code = None
         discount_amount = Decimal("0.00")
         final_total = subtotal
+        matched_voucher = None
 
         if data.voucher_code:
             from app.services.voucher_service import VoucherService
-            match, disc_val, final_val = VoucherService.validate_and_calculate_discount(
-                data.voucher_code, float(subtotal)
+            voucher_service = VoucherService(self.db)
+            matched_voucher, disc_val, final_val = await voucher_service.validate_and_calculate_discount(
+                data.voucher_code, float(subtotal), user_id=user_id
             )
-            voucher_code = match.code
+            voucher_code = matched_voucher.code
             discount_amount = Decimal(str(round(disc_val, 2)))
             final_total = Decimal(str(round(final_val, 2)))
 
@@ -121,6 +121,14 @@ class ReservationService:
         )
         self.db.add(reservation)
         await self.db.flush()
+
+        # Record voucher redemption if applicable
+        if matched_voucher:
+            await voucher_service.record_redemption(
+                voucher_id=matched_voucher.id,
+                user_id=user_id,
+                reservation_id=reservation.id,
+            )
 
         # Create reservation seats and update showtime_seat status
         for ss in locked_seats:
@@ -216,7 +224,7 @@ class ReservationService:
 
         # Check showtime is in the future
         showtime = await self.db.get(Showtime, reservation.showtime_id)
-        if showtime.start_time.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc):
+        if ensure_utc(showtime.start_time) <= datetime.now(timezone.utc):
             raise ReservationNotCancellableException()
 
         # Free up the seats
@@ -288,9 +296,9 @@ class ReservationService:
             "average_revenue_per_reservation": round(avg_revenue, 2),
         }
 
-    async def get_capacity_report(self) -> List[dict]:
+    async def get_capacity_report(self, pagination: Optional[PaginationParams] = None) -> List[dict]:
         """Admin: per-showtime capacity and revenue report."""
-        result = await self.db.execute(
+        query = (
             select(Showtime)
             .options(
                 selectinload(Showtime.movie),
@@ -301,8 +309,13 @@ class ReservationService:
                 ),
             )
             .order_by(Showtime.start_time.desc())
-            .limit(50)
         )
+        if pagination:
+            query = query.offset(pagination.offset).limit(pagination.limit)
+        else:
+            query = query.limit(50)
+
+        result = await self.db.execute(query)
         showtimes = result.scalars().all()
 
         report = []
