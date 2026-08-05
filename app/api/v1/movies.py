@@ -149,20 +149,6 @@ async def sync_tmdb_movie(
 
 
 @router.get(
-    "/tmdb/search",
-    summary="Search movies on TMDB (Admin)",
-)
-async def search_tmdb(
-    query: str = Query(..., min_length=1),
-    page: int = Query(1, ge=1),
-    _=Depends(require_admin),
-):
-    """Admin: Search TMDB database by query string."""
-    tmdb_service = TMDBService()
-    return await tmdb_service.search_movies(query, page)
-
-
-@router.get(
     "/tmdb/popular",
     summary="Get popular movies from TMDB (Admin)",
 )
@@ -214,6 +200,15 @@ async def auto_sync_tmdb(
             upcoming_list.extend(up_res.get("results", []))
             if p > up_res.get("total_pages", 1):
                 break
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        logger.error("TMDB API HTTP error during auto-sync", status_code=status_code, response=e.response.text)
+        if status_code == 401:
+            raise ConflictException("TMDB API Key không hợp lệ hoặc đã bị thu hồi (Lỗi 401 Unauthorized). Vui lòng kiểm tra lại TMDB_API_KEY trong file .env.")
+        elif status_code == 429:
+            raise ConflictException("TMDB API bị vượt quá giới hạn lượt gọi (Lỗi 429 Too Many Requests). Vui lòng đợi vài phút và thử lại.")
+        else:
+            raise ConflictException(f"Lỗi phản hồi từ máy chủ TMDB (HTTP {status_code}). Vui lòng thử lại sau.")
     except httpx.HTTPError as e:
         logger.error("TMDB API Connection failed during auto-sync", error=str(e))
         raise ConflictException(

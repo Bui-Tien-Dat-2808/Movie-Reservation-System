@@ -27,6 +27,14 @@ class MovieService:
         self.db = db
         self.cache = cache
 
+    @staticmethod
+    def _infer_status_from_release_date(release_date):
+        from datetime import date
+
+        if release_date and release_date > date.today():
+            return MovieStatus.COMING_SOON
+        return MovieStatus.NOW_SHOWING
+
     async def auto_update_movie_statuses(self) -> int:
         """
         Efficiently update movie statuses using set operations (4 SQL queries total).
@@ -53,7 +61,9 @@ class MovieService:
         for m in cs_res.scalars().all():
             has_future_st = m.id in future_showtime_movie_ids
             old_status = m.status
-            if (m.release_date and m.release_date <= today) or has_future_st:
+            if m.release_date and m.release_date <= today:
+                m.status = MovieStatus.NOW_SHOWING
+            elif not m.release_date and has_future_st:
                 m.status = MovieStatus.NOW_SHOWING
             elif m.release_date and m.release_date < cutoff_date and not has_future_st:
                 m.status = MovieStatus.ENDED
@@ -70,8 +80,14 @@ class MovieService:
             is_old_release = m.release_date and m.release_date < cutoff_date
             old_status = m.status
 
+            # Future-dated releases should stay in COMING_SOON even if they have
+            # future showtimes. This prevents unreleased films from being exposed
+            # as "now showing" just because they were pre-scheduled.
+            if m.release_date and m.release_date > today:
+                m.status = MovieStatus.COMING_SOON
+
             # Convert to ENDED ONLY if there are no future showtimes left AND release_date is older than 60 days
-            if not has_future_st and is_old_release:
+            elif not has_future_st and is_old_release:
                 m.status = MovieStatus.ENDED
 
             if m.status != old_status:
@@ -301,6 +317,7 @@ class MovieService:
         # Check if already exists
         result = await self.db.execute(select(Movie).where(Movie.tmdb_id == tmdb_id))
         movie = result.scalar_one_or_none()
+        inferred_status = self._infer_status_from_release_date(tmdb_data.get("release_date"))
 
         # Fallback poster lookup if primary TMDB poster_url is empty
         poster_url = tmdb_data.get("poster_url")
@@ -322,6 +339,7 @@ class MovieService:
             movie.duration_minutes = tmdb_data.get("runtime")
             movie.release_date = tmdb_data.get("release_date")
             movie.language = tmdb_data.get("original_language")
+            movie.status = inferred_status
         else:
             # Create new
             movie = Movie(
@@ -332,6 +350,7 @@ class MovieService:
                 release_date=tmdb_data.get("release_date"),
                 language=tmdb_data.get("original_language"),
                 tmdb_id=tmdb_id,
+                status=inferred_status,
                 is_active=True,
             )
             self.db.add(movie)
