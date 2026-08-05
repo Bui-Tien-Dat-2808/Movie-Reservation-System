@@ -76,3 +76,5 @@ Thumbs.db
 
 # Alembic
 alembic/versions/*.pyc
+
+movie_reservation*.db
