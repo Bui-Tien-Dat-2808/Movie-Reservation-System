@@ -1,5 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+VIETNAM_TZ = timezone(timedelta(hours=7))
+
+
+def get_cinema_timezone() -> timezone:
+    """Get cinema timezone (UTC+7 for Vietnam)."""
+    return VIETNAM_TZ
 
 
 def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:

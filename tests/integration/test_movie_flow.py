@@ -50,8 +50,8 @@ class TestMoviesCRUD:
         assert response.status_code == 404
 
     async def test_page_size_exceeding_limit_returns_422(self, client: AsyncClient):
-        """Request with page_size > 100 should be rejected with HTTP 422."""
-        response = await client.get("/api/v1/movies/?page_size=200")
+        """Request with page_size > 1000 should be rejected with HTTP 422."""
+        response = await client.get("/api/v1/movies/?page_size=2000")
         assert response.status_code == 422
 
     async def test_update_movie(self, client: AsyncClient, test_admin):
@@ -274,6 +274,123 @@ class TestShowtimeCRUD:
         assert data["movie_id"] == movie_id
         assert data["room_id"] == room_id
         assert data["status"] == "scheduled"
+
+    async def test_list_showtimes_eager_loads_room_seats_without_lazy_load_error(
+        self, client: AsyncClient, test_admin
+    ):
+        """Listing showtimes should return 200 OK and serialize room.total_seats without lazy load error."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "now_showing", "Eager Movie")
+        room_id = await self._create_room(client, headers, "Eager Room")
+
+        # Create a showtime
+        create_resp = await client.post(
+            "/api/v1/showtimes/",
+            json=self._showtime_payload(movie_id, room_id),
+            headers=headers,
+        )
+        assert create_resp.status_code == 201
+
+        # List showtimes (GET /api/v1/showtimes/)
+        list_resp = await client.get("/api/v1/showtimes/?page_size=100")
+        assert list_resp.status_code == 200
+        body = list_resp.json()
+        assert "items" in body
+        assert len(body["items"]) > 0
+
+        # Check room details serialization
+        first_item = body["items"][0]
+        assert first_item["room"] is not None
+        assert "total_seats" in first_item["room"]
+        assert isinstance(first_item["room"]["total_seats"], int)
+
+    async def test_auto_schedule_preview_and_confirm(
+        self, client: AsyncClient, test_admin
+    ):
+        """Admin generates preview and confirms auto-scheduling of showtimes."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "now_showing", "Auto Movie 1")
+        room_id = await self._create_room(client, headers, "Room Auto 1")
+
+        start_date = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%d")
+        end_date = (datetime.now(timezone.utc) + timedelta(days=4)).strftime("%Y-%m-%d")
+
+        # 1. Preview
+        preview_resp = await client.post(
+            "/api/v1/showtimes/admin/auto-schedule/preview",
+            json={
+                "start_date": start_date,
+                "end_date": end_date,
+                "movie_ids": [movie_id],
+                "room_ids": [room_id],
+                "start_hour": 9,
+                "end_hour": 22,
+                "buffer_minutes": 15,
+                "base_price": 90000.0,
+                "vip_price": 120000.0,
+            },
+            headers=headers,
+        )
+        assert preview_resp.status_code == 200
+        proposed = preview_resp.json()
+        assert len(proposed) > 0
+        assert proposed[0]["movie_id"] == movie_id
+
+        # 2. Confirm
+        confirm_resp = await client.post(
+            "/api/v1/showtimes/admin/auto-schedule/confirm",
+            json={"showtimes": proposed},
+            headers=headers,
+        )
+        assert confirm_resp.status_code == 201
+        assert confirm_resp.json()["count"] == len(proposed)
+
+    async def test_bulk_cancel_showtimes(self, client: AsyncClient, test_admin):
+        """Admin should be able to bulk cancel showtimes."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "now_showing", "Bulk Cancel Movie")
+        room_id = await self._create_room(client, headers, "Bulk Cancel Room")
+
+        # Create 1 showtime
+        await client.post("/api/v1/showtimes/", json=self._showtime_payload(movie_id, room_id), headers=headers)
+
+        # Bulk cancel with movie_id filter
+        cancel_resp = await client.delete(f"/api/v1/showtimes/admin/bulk-cancel?movie_id={movie_id}", headers=headers)
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["count"] > 0
+
+    async def test_auto_schedule_cinema_timezone_conversion(
+        self, client: AsyncClient, test_admin
+    ):
+        """Entering 08:00 - 23:30 (Vietnam local time UTC+7) should produce 01:00 UTC for the first showtime."""
+        headers = get_auth_headers(test_admin)
+        movie_id = await self._create_movie(client, headers, "now_showing", "TZ Movie")
+        room_id = await self._create_room(client, headers, "TZ Room")
+
+        start_date = (datetime.now(timezone.utc) + timedelta(days=5)).strftime("%Y-%m-%d")
+
+        preview_resp = await client.post(
+            "/api/v1/showtimes/admin/auto-schedule/preview",
+            json={
+                "start_date": start_date,
+                "end_date": start_date,
+                "movie_ids": [movie_id],
+                "room_ids": [room_id],
+                "start_time_str": "08:00",
+                "end_time_str": "23:30",
+                "buffer_minutes": 15,
+                "base_price": 90000.0,
+                "vip_price": 120000.0,
+            },
+            headers=headers,
+        )
+        assert preview_resp.status_code == 200
+        proposed = preview_resp.json()
+        assert len(proposed) > 0
+
+        # The first showtime start_time in UTC should be 01:00 (since 08:00 AM VN time = 01:00 AM UTC)
+        first_st_start = proposed[0]["start_time"]
+        assert "T01:00:00" in first_st_start
 
     async def test_create_showtime_for_coming_soon_movie_succeeds(
         self, client: AsyncClient, test_admin

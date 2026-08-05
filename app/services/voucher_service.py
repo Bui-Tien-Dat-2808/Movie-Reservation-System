@@ -36,9 +36,13 @@ class VoucherService:
         """Validate voucher code against DB constraints and calculate discount."""
         code_upper = code.strip().upper()
 
-        stmt = select(Voucher).where(
-            func.upper(Voucher.code) == code_upper,
-            Voucher.is_active == True,
+        stmt = (
+            select(Voucher)
+            .where(
+                func.upper(Voucher.code) == code_upper,
+                Voucher.is_active == True,
+            )
+            .with_for_update()
         )
         res = await self.db.execute(stmt)
         voucher = res.scalar_one_or_none()

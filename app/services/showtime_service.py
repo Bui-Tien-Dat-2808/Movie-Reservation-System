@@ -65,8 +65,11 @@ class ShowtimeService:
         movie_id: Optional[int] = None,
         room_id: Optional[int] = None,
         date: Optional[str] = None,
-    ) -> tuple[List[Showtime], int]:
-        """List showtimes with optional filters."""
+    ) -> tuple[List[dict], int]:
+        """List showtimes with optional filters using high performance SQL aggregation."""
+        from sqlalchemy import Integer
+        from app.schemas.showtime import ShowtimeResponse
+
         query = select(Showtime).where(Showtime.status != ShowtimeStatus.CANCELLED)
 
         if movie_id:
@@ -86,21 +89,50 @@ class ShowtimeService:
         query = (
             query.offset(pagination.offset)
             .limit(pagination.limit)
-            .order_by(Showtime.start_time)
+            .order_by(Showtime.start_time.desc())
             .options(
                 selectinload(Showtime.movie).selectinload(Movie.movie_genres).selectinload(MovieGenre.genre),
-                selectinload(Showtime.room),
-                selectinload(Showtime.showtime_seats),
+                selectinload(Showtime.room).selectinload(Room.seats),
             )
         )
         result = await self.db.execute(query)
         showtimes = result.scalars().all()
         
         for st in showtimes:
-            self._apply_lazy_expiration(st.showtime_seats)
             await self._update_showtime_status_if_needed(st)
 
-        return list(showtimes), total
+        if showtimes:
+            from sqlalchemy import case
+
+            st_ids = [st.id for st in showtimes]
+            seat_stmt = (
+                select(
+                    ShowtimeSeat.showtime_id,
+                    func.count(ShowtimeSeat.id).label("total_seats"),
+                    func.sum(
+                        case((ShowtimeSeat.status == SeatStatus.AVAILABLE, 1), else_=0)
+                    ).label("available_seats"),
+                )
+                .where(ShowtimeSeat.showtime_id.in_(st_ids))
+                .group_by(ShowtimeSeat.showtime_id)
+            )
+            seat_res = await self.db.execute(seat_stmt)
+            seat_counts = {
+                row.showtime_id: (int(row.total_seats or 0), int(row.available_seats or 0))
+                for row in seat_res
+            }
+        else:
+            seat_counts = {}
+
+        items = []
+        for st in showtimes:
+            total_s, avail_s = seat_counts.get(st.id, (0, 0))
+            resp = ShowtimeResponse.model_validate(st)
+            resp.total_seats = total_s
+            resp.available_seats = avail_s
+            items.append(resp)
+
+        return items, total
 
     async def get_showtime(self, showtime_id: int) -> Showtime:
         """Get single showtime."""
@@ -200,10 +232,9 @@ class ShowtimeService:
 
         update_data = data.model_dump(exclude_unset=True)
 
-        if "start_time" in update_data or "end_time" in update_data or "room_id" in update_data:
+        if "start_time" in update_data or "end_time" in update_data:
             new_start = update_data.get("start_time", showtime.start_time)
             new_end = update_data.get("end_time", showtime.end_time)
-            new_room_id = update_data.get("room_id", showtime.room_id)
 
             now_utc = datetime.now(timezone.utc)
             check_start = ensure_utc(new_start)
@@ -212,7 +243,7 @@ class ShowtimeService:
 
             conflict = await self.db.execute(
                 select(Showtime).where(
-                    Showtime.room_id == new_room_id,
+                    Showtime.room_id == showtime.room_id,
                     Showtime.id != showtime_id,
                     Showtime.status != ShowtimeStatus.CANCELLED,
                     Showtime.start_time < new_end,
@@ -242,6 +273,30 @@ class ShowtimeService:
         logger.info("Showtime cancelled", showtime_id=showtime_id)
         return showtime
 
+    async def bulk_cancel_showtimes(
+        self,
+        movie_id: Optional[int] = None,
+        room_id: Optional[int] = None,
+    ) -> int:
+        """Bulk cancel showtimes matching optional movie/room filters."""
+        query = select(Showtime).where(Showtime.status != ShowtimeStatus.CANCELLED)
+        if movie_id:
+            query = query.where(Showtime.movie_id == movie_id)
+        if room_id:
+            query = query.where(Showtime.room_id == room_id)
+
+        res = await self.db.execute(query)
+        showtimes = res.scalars().all()
+        count = len(showtimes)
+
+        for st in showtimes:
+            st.status = ShowtimeStatus.CANCELLED
+
+        await self.db.commit()
+        await self.cache.delete_pattern("showtimes:*")
+        logger.info("Bulk showtimes cancelled", count=count, movie_id=movie_id, room_id=room_id)
+        return count
+
     async def get_seat_map(self, showtime_id: int) -> dict:
         """Get seat availability map for a showtime."""
         showtime = await self.get_showtime(showtime_id)
@@ -265,3 +320,216 @@ class ShowtimeService:
             "reserved_seats": reserved_count,
             "seats": seats,
         }
+
+    async def generate_auto_schedule_preview(
+        self, req
+    ):
+        """Algorithm to generate proposed auto-scheduled showtimes without saving to DB."""
+        from datetime import datetime, date as date_cls, time as time_cls, timedelta, timezone
+        from app.models.movie import Movie, MovieStatus
+        from app.models.room import Room
+        from app.schemas.showtime import ProposedShowtimeItem
+        from app.core.exceptions import ValidationException
+
+        try:
+            start_d = date_cls.fromisoformat(req.start_date)
+            end_d = date_cls.fromisoformat(req.end_date)
+        except ValueError:
+            raise ValidationException("Invalid date format. Use YYYY-MM-DD")
+
+        if end_d < start_d:
+            raise ValidationException("end_date must be greater than or equal to start_date")
+
+        if req.movie_ids:
+            movie_res = await self.db.execute(
+                select(Movie).where(Movie.id.in_(req.movie_ids), Movie.is_active == True)
+            )
+            movies = movie_res.scalars().all()
+        else:
+            movie_res = await self.db.execute(
+                select(Movie).where(
+                    Movie.status.in_([MovieStatus.NOW_SHOWING, MovieStatus.COMING_SOON]),
+                    Movie.is_active == True,
+                )
+            )
+            movies = movie_res.scalars().all()
+
+        if not movies:
+            raise ValidationException("No active movies found for auto-scheduling")
+
+        if req.room_ids:
+            room_res = await self.db.execute(
+                select(Room).where(Room.id.in_(req.room_ids), Room.is_active == True)
+            )
+            rooms = room_res.scalars().all()
+        else:
+            room_res = await self.db.execute(select(Room).where(Room.is_active == True))
+            rooms = room_res.scalars().all()
+
+        if not rooms:
+            raise ValidationException("No active screening rooms found")
+
+        proposed_list = []
+        movie_idx = 0
+        now_utc = datetime.now(timezone.utc)
+
+        from app.utils.datetime_utils import ensure_utc, get_cinema_timezone
+        cinema_tz = get_cinema_timezone()
+
+        curr_d = start_d
+        while curr_d <= end_d:
+            for room in rooms:
+                start_dt_bound = datetime.combine(curr_d, time_cls(0, 0), tzinfo=cinema_tz).astimezone(timezone.utc)
+                end_dt_bound = datetime.combine(curr_d, time_cls(23, 59, 59), tzinfo=cinema_tz).astimezone(timezone.utc)
+
+                if getattr(req, "replace_existing", True):
+                    existing_st = []
+                else:
+                    existing_res = await self.db.execute(
+                        select(Showtime).where(
+                            Showtime.room_id == room.id,
+                            Showtime.status != ShowtimeStatus.CANCELLED,
+                            Showtime.start_time >= start_dt_bound,
+                            Showtime.start_time <= end_dt_bound,
+                        ).order_by(Showtime.start_time.asc())
+                    )
+                    existing_st = existing_res.scalars().all()
+
+                start_h, start_m = 8, 0
+                end_h, end_m = 23, 30
+
+                if getattr(req, "start_time_str", None):
+                    parts = req.start_time_str.split(":")
+                    if len(parts) == 2:
+                        start_h, start_m = int(parts[0]), int(parts[1])
+                elif getattr(req, "start_hour", None) is not None:
+                    start_h = req.start_hour
+
+                if getattr(req, "end_time_str", None):
+                    parts = req.end_time_str.split(":")
+                    if len(parts) == 2:
+                        end_h, end_m = int(parts[0]), int(parts[1])
+                elif getattr(req, "end_hour", None) is not None:
+                    end_h = req.end_hour
+
+                day_start_dt = datetime.combine(curr_d, time_cls(start_h, start_m), tzinfo=cinema_tz).astimezone(timezone.utc)
+                day_end_dt = datetime.combine(curr_d, time_cls(end_h, end_m), tzinfo=cinema_tz).astimezone(timezone.utc)
+
+                slot_time = day_start_dt
+
+                while slot_time < day_end_dt:
+                    if slot_time < now_utc:
+                        slot_time += timedelta(minutes=30)
+                        continue
+
+                    m = movies[movie_idx % len(movies)]
+                    duration_mins = m.duration_minutes or 120
+                    st_end = slot_time + timedelta(minutes=duration_mins)
+
+                    has_collision = False
+                    for ex in existing_st:
+                        ex_start = ensure_utc(ex.start_time)
+                        ex_end = ensure_utc(ex.end_time)
+                        if slot_time < ex_end and st_end > ex_start:
+                            has_collision = True
+                            slot_time = ex_end + timedelta(minutes=req.buffer_minutes)
+                            break
+
+                    if has_collision:
+                        continue
+
+                    if st_end > day_end_dt:
+                        break
+
+                    proposed_list.append(
+                        ProposedShowtimeItem(
+                            movie_id=m.id,
+                            movie_title=m.title,
+                            room_id=room.id,
+                            room_name=room.name,
+                            start_time=slot_time,
+                            end_time=st_end,
+                            base_price=req.base_price,
+                            vip_price=req.vip_price,
+                        )
+                    )
+
+                    slot_time = st_end + timedelta(minutes=req.buffer_minutes)
+                    movie_idx += 1
+
+            curr_d += timedelta(days=1)
+
+        return proposed_list
+
+    async def confirm_auto_schedule(
+        self,
+        showtimes_data: list,
+        replace_existing: bool = True,
+    ) -> int:
+        """Bulk insert approved auto-scheduled showtimes into DB."""
+        from app.models.room import Room
+        from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+
+        if not showtimes_data:
+            return 0
+
+        if replace_existing and showtimes_data:
+            all_starts = [ensure_utc(item.start_time) for item in showtimes_data]
+            all_ends = [ensure_utc(item.end_time) for item in showtimes_data]
+            min_start = min(all_starts)
+            max_end = max(all_ends)
+            all_room_ids = list({item.room_id for item in showtimes_data})
+
+            clean_stmt = (
+                select(Showtime)
+                .where(
+                    Showtime.room_id.in_(all_room_ids),
+                    Showtime.status != ShowtimeStatus.CANCELLED,
+                    Showtime.start_time >= min_start,
+                    Showtime.start_time <= max_end,
+                )
+            )
+            old_res = await self.db.execute(clean_stmt)
+            old_sts = old_res.scalars().all()
+            for old_st in old_sts:
+                old_st.status = ShowtimeStatus.CANCELLED
+            if old_sts:
+                await self.db.flush()
+                logger.info("Replaced existing showtimes", cancelled_count=len(old_sts))
+
+        count = 0
+        for item in showtimes_data:
+            st = Showtime(
+                movie_id=item.movie_id,
+                room_id=item.room_id,
+                start_time=ensure_utc(item.start_time),
+                end_time=ensure_utc(item.end_time),
+                base_price=item.base_price,
+                vip_price=item.vip_price,
+                status=ShowtimeStatus.SCHEDULED,
+            )
+            self.db.add(st)
+            await self.db.flush()
+
+            room = await self.db.get(Room, item.room_id)
+            if room:
+                await self.db.refresh(room, attribute_names=["seats"])
+                if not room.seats:
+                    logger.warning("Screening room has no seats configured", room_id=item.room_id)
+                for seat in room.seats:
+                    if seat.is_active:
+                        ss = ShowtimeSeat(
+                            showtime_id=st.id,
+                            seat_id=seat.id,
+                            status=SeatStatus.AVAILABLE,
+                        )
+                        self.db.add(ss)
+            else:
+                logger.warning("Room not found during auto-schedule confirm", room_id=item.room_id)
+            count += 1
+            logger.info("Auto-scheduled showtime created", showtime_id=st.id, movie_id=st.movie_id, room_id=st.room_id)
+
+        await self.db.commit()
+        await self.cache.delete_pattern("showtimes:*")
+        logger.info("Auto-scheduled showtimes committed", total=count)
+        return count

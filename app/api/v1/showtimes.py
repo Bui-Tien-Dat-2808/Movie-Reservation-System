@@ -13,6 +13,9 @@ from app.schemas.showtime import (
     ShowtimeUpdate,
     SeatHoldRequest,
     SeatHoldResponse,
+    AutoScheduleRequest,
+    ProposedShowtimeItem,
+    AutoScheduleConfirmRequest,
 )
 from app.services.cache_service import CacheService
 from app.services.showtime_service import ShowtimeService
@@ -45,17 +48,7 @@ async def list_showtimes(
     List showtimes with optional filters.
     Filter by movie, room, or specific date.
     """
-    showtimes, total = await service.get_showtimes(pagination, movie_id, room_id, date)
-
-    items = []
-    for st in showtimes:
-        available = sum(1 for s in st.showtime_seats if s.status.value == "available")
-        total_s = len(st.showtime_seats)
-        response = ShowtimeResponse.model_validate(st)
-        response.available_seats = available
-        response.total_seats = total_s
-        items.append(response)
-
+    items, total = await service.get_showtimes(pagination, movie_id, room_id, date)
     return paginate(items, total, pagination.page, pagination.page_size)
 
 
@@ -133,6 +126,53 @@ async def cancel_showtime(
 ):
     """Admin: cancel a showtime."""
     await service.cancel_showtime(showtime_id)
+
+
+@router.post(
+    "/admin/auto-schedule/preview",
+    response_model=list[ProposedShowtimeItem],
+    summary="Preview auto-scheduled showtimes (Admin)",
+)
+async def preview_auto_schedule(
+    data: AutoScheduleRequest,
+    service: ShowtimeService = Depends(get_showtime_service),
+    _=Depends(require_admin),
+):
+    """Admin: Generate preview of auto-scheduled showtimes without saving."""
+    return await service.generate_auto_schedule_preview(data)
+
+
+@router.post(
+    "/admin/auto-schedule/confirm",
+    status_code=status.HTTP_201_CREATED,
+    summary="Confirm and bulk save auto-scheduled showtimes (Admin)",
+)
+async def confirm_auto_schedule(
+    data: AutoScheduleConfirmRequest,
+    service: ShowtimeService = Depends(get_showtime_service),
+    _=Depends(require_admin),
+):
+    """Admin: Bulk insert approved proposed showtimes into DB."""
+    count = await service.confirm_auto_schedule(
+        data.showtimes,
+        replace_existing=data.replace_existing,
+    )
+    return {"message": f"Successfully created {count} showtimes", "count": count}
+
+
+@router.delete(
+    "/admin/bulk-cancel",
+    summary="Bulk cancel showtimes (Admin)",
+)
+async def bulk_cancel_showtimes(
+    movie_id: Optional[int] = Query(None, description="Filter by movie ID"),
+    room_id: Optional[int] = Query(None, description="Filter by room ID"),
+    service: ShowtimeService = Depends(get_showtime_service),
+    _=Depends(require_admin),
+):
+    """Admin: Bulk cancel all showtimes (or showtimes matching movie/room filter)."""
+    count = await service.bulk_cancel_showtimes(movie_id, room_id)
+    return {"message": f"Successfully cancelled {count} showtimes", "count": count}
 
 
 @router.post(

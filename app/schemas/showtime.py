@@ -80,3 +80,37 @@ class ShowtimeSeatMapResponse(BaseModel):
     seats: List[ShowtimeSeatResponse]
 
     model_config = {"from_attributes": True}
+
+
+class AutoScheduleRequest(BaseModel):
+    start_date: str = Field(..., description="YYYY-MM-DD")
+    end_date: str = Field(..., description="YYYY-MM-DD")
+    movie_ids: Optional[List[int]] = None
+    room_ids: Optional[List[int]] = None
+    start_time_str: str = Field("08:00", description="HH:MM format e.g. 08:00")
+    end_time_str: str = Field("23:30", description="HH:MM format e.g. 23:30")
+    start_hour: Optional[int] = Field(8, ge=0, le=23)
+    end_hour: Optional[int] = Field(23, ge=0, le=23)
+    buffer_minutes: int = Field(15, ge=0, le=60)
+    base_price: Decimal = Field(Decimal("90000.0"), gt=0)
+    vip_price: Decimal = Field(Decimal("120000.0"), gt=0)
+    replace_existing: bool = True
+
+
+class ProposedShowtimeItem(BaseModel):
+    movie_id: int
+    movie_title: str
+    room_id: int
+    room_name: str
+    start_time: datetime
+    end_time: datetime
+    base_price: Decimal
+    vip_price: Decimal
+
+
+class AutoScheduleConfirmRequest(BaseModel):
+    showtimes: List[ProposedShowtimeItem]
+    replace_existing: bool = True
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    room_ids: Optional[List[int]] = None

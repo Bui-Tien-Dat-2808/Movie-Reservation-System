@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     ENVIRONMENT: str = "development"
     API_V1_PREFIX: str = "/api/v1"
+    CINEMA_TIMEZONE: str = "Asia/Ho_Chi_Minh"
 
     # Database
     DATABASE_URL: str
