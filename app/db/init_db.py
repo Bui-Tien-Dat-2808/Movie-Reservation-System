@@ -14,11 +14,7 @@ logger = structlog.get_logger()
 
 
 async def init_db() -> None:
-    """Initialize the database: create tables, seed admin, rooms, and movies."""
-    async with engine.begin() as conn:
-        # Create all tables (only if they don't exist)
-        await conn.run_sync(Base.metadata.create_all)
-
+    """Initialize the database: seed admin, rooms, and movies."""
     await _seed_admin()
     await _seed_rooms()
     await _seed_tmdb_movies()
