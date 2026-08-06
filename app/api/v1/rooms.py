@@ -1,6 +1,6 @@
 import string
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, status
@@ -42,15 +42,20 @@ async def _generate_seats(db: AsyncSession, room: Room) -> None:
     await db.flush()
 
 
+from sqlalchemy import select, func as sqla_func
+from app.models.room import Room, RoomType
+
 @router.get("/", response_model=List[RoomResponse], summary="List all rooms")
-async def list_rooms(db: AsyncSession = Depends(get_db)):
+async def list_rooms(
+    room_type: Optional[RoomType] = None,
+    db: AsyncSession = Depends(get_db),
+):
     """Get all active screening rooms."""
-    result = await db.execute(
-        select(Room)
-        .where(Room.is_active == True)
-        .options(selectinload(Room.seats))
-        .order_by(Room.name)
-    )
+    query = select(Room).where(Room.is_active == True).options(selectinload(Room.seats))
+    if room_type:
+        query = query.where(Room.room_type == room_type)
+    query = query.order_by(Room.room_type, Room.room_number)
+    result = await db.execute(query)
     return result.scalars().all()
 
 
@@ -208,15 +213,45 @@ async def create_room(
     Seats are automatically generated based on total_rows × total_cols.
     Middle third rows will be VIP seats.
     """
+    from app.core.exceptions import ConflictException
+
+    # 1. Determine room_number if not provided
+    room_number = data.room_number
+    if not room_number:
+        max_num_res = await db.execute(
+            select(sqla_func.coalesce(sqla_func.max(Room.room_number), 0))
+            .where(Room.room_type == data.room_type)
+        )
+        room_number = max_num_res.scalar_one() + 1
+
+    # Check unique (room_type, room_number)
+    existing_num = await db.execute(
+        select(Room).where(Room.room_type == data.room_type, Room.room_number == room_number)
+    )
+    if existing_num.scalar_one_or_none():
+        raise ConflictException(f"Phòng số {room_number} thuộc loại '{data.room_type.value}' đã tồn tại.")
+
+    # 2. Determine room name if not provided
+    name_label_map = {
+        RoomType.STANDARD: "Standard",
+        RoomType.VIP: "VIP",
+        RoomType.IMAX: "IMAX",
+        RoomType.THREE_D: "3D",
+        RoomType.FOUR_D: "4DX",
+        RoomType.KIDS: "Kids",
+    }
+    label = name_label_map.get(data.room_type, "Room")
+    room_name = data.name.strip() if data.name and data.name.strip() else f"{label} {room_number}"
+
     # Check unique name
-    existing = await db.execute(select(Room).where(Room.name == data.name))
-    if existing.scalar_one_or_none():
-        from app.core.exceptions import ConflictException
-        raise ConflictException(f"Room '{data.name}' already exists")
+    existing_name = await db.execute(select(Room).where(Room.name == room_name))
+    if existing_name.scalar_one_or_none():
+        raise ConflictException(f"Phòng tên '{room_name}' đã tồn tại.")
 
     room = Room(
-        name=data.name,
+        name=room_name,
         room_type=data.room_type,
+        room_number=room_number,
         description=data.description,
         total_rows=data.total_rows,
         total_cols=data.total_cols,
@@ -262,3 +297,50 @@ async def update_room(
     await db.flush()
     await db.refresh(room)
     return room
+
+
+@router.delete("/{room_id}", summary="Delete room (Admin)")
+async def delete_room(
+    room_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """
+    Admin: delete a screening room.
+    Checks if there are active showtimes scheduled in this room.
+    If active showtimes exist, raises error preventing deletion.
+    If only past/cancelled showtimes exist, soft-deletes (is_active=False).
+    If no showtimes exist, hard-deletes room and its seats.
+    """
+    from app.core.exceptions import NotFoundException, BadRequestException
+
+    result = await db.execute(select(Room).where(Room.id == room_id))
+    room = result.scalar_one_or_none()
+    if not room:
+        raise NotFoundException("Room", room_id)
+
+    # Check for active non-cancelled showtimes
+    st_res = await db.execute(
+        select(Showtime).where(
+            Showtime.room_id == room_id,
+            Showtime.status != ShowtimeStatus.CANCELLED,
+        )
+    )
+    active_showtimes = st_res.scalars().all()
+    if active_showtimes:
+        raise BadRequestException(
+            f"Không thể xóa phòng '{room.name}' vì đang có {len(active_showtimes)} suất chiếu được xếp lịch. Vui lòng hủy các suất chiếu của phòng này trước."
+        )
+
+    # Check for historical showtimes
+    hist_res = await db.execute(select(Showtime).where(Showtime.room_id == room_id))
+    has_history = hist_res.scalars().first() is not None
+
+    if has_history:
+        room.is_active = False
+        await db.flush()
+        return {"message": f"Đã ẩn phòng '{room.name}' khỏi hệ thống."}
+    else:
+        await db.delete(room)
+        await db.flush()
+        return {"message": f"Đã xóa hoàn toàn phòng '{room.name}'."}

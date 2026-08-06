@@ -61,6 +61,15 @@ class ConflictException(AppException):
         )
 
 
+class BadRequestException(AppException):
+    def __init__(self, detail: str = "Bad request"):
+        super().__init__(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+            error_code="BAD_REQUEST",
+        )
+
+
 class ValidationException(AppException):
     def __init__(self, detail: str = "Validation error"):
         super().__init__(

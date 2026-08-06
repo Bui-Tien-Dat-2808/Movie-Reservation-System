@@ -48,27 +48,55 @@ async def _seed_admin() -> None:
 
 
 async def _seed_rooms() -> None:
-    """Seed default screening rooms."""
+    """Seed default screening rooms and normalize room names."""
     from app.models.room import Room, RoomType
     from app.api.v1.rooms import _generate_seats
 
+    name_label_map = {
+        RoomType.STANDARD: "Standard",
+        RoomType.VIP: "VIP",
+        RoomType.IMAX: "IMAX",
+        RoomType.THREE_D: "3D",
+        RoomType.FOUR_D: "4DX",
+        RoomType.KIDS: "Kids",
+    }
+
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Room))
-        if result.scalars().first():
-            logger.info("Rooms already exist, skipping room seeding")
+        result = await db.execute(select(Room).order_by(Room.room_type, Room.room_number, Room.id))
+        all_rooms = result.scalars().all()
+        if all_rooms:
+            # Normalize existing room names to {Label} {room_number} if messy
+            for r_type in RoomType:
+                type_rooms = [r for r in all_rooms if r.room_type == r_type]
+                for idx, room in enumerate(type_rooms, start=1):
+                    label = name_label_map.get(room.room_type, "Room")
+                    expected_name = f"{label} {idx}"
+                    if room.room_number != idx or room.name != expected_name:
+                        logger.info("Normalizing room name & number", old_name=room.name, new_name=expected_name, room_number=idx)
+                        room.room_number = idx
+                        room.name = expected_name
+            await db.commit()
+            logger.info("Rooms already exist, normalized names successfully")
             return
 
         rooms_data = [
-            {"name": "Room 1 (IMAX)", "room_type": RoomType.IMAX, "total_rows": 8, "total_cols": 12},
-            {"name": "Room 2 (3D)", "room_type": RoomType.THREE_D, "total_rows": 6, "total_cols": 10},
-            {"name": "Room 3 (Standard)", "room_type": RoomType.STANDARD, "total_rows": 10, "total_cols": 15},
-            {"name": "Room 4 (VIP)", "room_type": RoomType.VIP, "total_rows": 4, "total_cols": 8},
+            {"name": "Standard 1", "room_type": RoomType.STANDARD, "room_number": 1, "total_rows": 10, "total_cols": 15},
+            {"name": "Standard 2", "room_type": RoomType.STANDARD, "room_number": 2, "total_rows": 10, "total_cols": 15},
+            {"name": "Standard 3", "room_type": RoomType.STANDARD, "room_number": 3, "total_rows": 10, "total_cols": 14},
+            {"name": "Standard 4", "room_type": RoomType.STANDARD, "room_number": 4, "total_rows": 10, "total_cols": 14},
+            {"name": "VIP 1", "room_type": RoomType.VIP, "room_number": 1, "total_rows": 4, "total_cols": 8},
+            {"name": "IMAX 1", "room_type": RoomType.IMAX, "room_number": 1, "total_rows": 8, "total_cols": 12},
+            {"name": "3D 1", "room_type": RoomType.THREE_D, "room_number": 1, "total_rows": 6, "total_cols": 10},
+            {"name": "3D 2", "room_type": RoomType.THREE_D, "room_number": 2, "total_rows": 6, "total_cols": 10},
+            {"name": "4DX 1", "room_type": RoomType.FOUR_D, "room_number": 1, "total_rows": 5, "total_cols": 8},
+            {"name": "Kids 1", "room_type": RoomType.KIDS, "room_number": 1, "total_rows": 5, "total_cols": 8},
         ]
 
         for r_data in rooms_data:
             r_room = Room(
                 name=r_data["name"],
                 room_type=r_data["room_type"],
+                room_number=r_data["room_number"],
                 total_rows=r_data["total_rows"],
                 total_cols=r_data["total_cols"],
                 is_active=True,

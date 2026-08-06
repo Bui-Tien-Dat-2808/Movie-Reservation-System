@@ -95,6 +95,8 @@ class AutoScheduleRequest(BaseModel):
     base_price: Decimal = Field(Decimal("90000.0"), gt=0)
     vip_price: Decimal = Field(Decimal("120000.0"), gt=0)
     replace_existing: bool = True
+    smart_genre_matching: bool = True
+    auto_pricing_by_room_type: bool = True
 
 
 class ProposedShowtimeItem(BaseModel):
@@ -102,6 +104,8 @@ class ProposedShowtimeItem(BaseModel):
     movie_title: str
     room_id: int
     room_name: str
+    room_type: Optional[str] = "standard"
+    matched_genre: Optional[str] = None
     start_time: datetime
     end_time: datetime
     base_price: Decimal

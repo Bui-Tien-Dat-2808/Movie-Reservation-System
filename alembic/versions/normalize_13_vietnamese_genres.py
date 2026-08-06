@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'normalize_13_vietnamese_genres'
-down_revision = 'add_voucher_fields_to_reservations'
+down_revision = 'add_voucher_fields_reservation'
 branch_labels = None
 depends_on = None
 

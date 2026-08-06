@@ -133,6 +133,25 @@ class TestRoomCRUD:
         response = await client.get("/api/v1/rooms/")
         assert response.status_code == 200
 
+    async def test_delete_room(self, client: AsyncClient, test_admin):
+        headers = get_auth_headers(test_admin)
+        resp = await client.post("/api/v1/rooms/", json={
+            "name": "Room to Delete",
+            "room_type": "standard",
+            "total_rows": 4,
+            "total_cols": 6,
+        }, headers=headers)
+        assert resp.status_code == 201
+        room_id = resp.json()["id"]
+
+        del_resp = await client.delete(f"/api/v1/rooms/{room_id}", headers=headers)
+        assert del_resp.status_code == 200
+
+        list_resp = await client.get("/api/v1/rooms/")
+        assert list_resp.status_code == 200
+        room_ids = [r["id"] for r in list_resp.json()]
+        assert room_id not in room_ids
+
 
 class TestNowShowing:
     """Tests for GET /api/v1/movies/now-showing endpoint."""

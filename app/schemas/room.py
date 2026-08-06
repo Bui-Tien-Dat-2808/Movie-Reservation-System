@@ -21,11 +21,12 @@ class SeatResponse(BaseModel):
 
 
 class RoomBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
+    name: Optional[str] = Field(None, max_length=255)
     room_type: RoomType = RoomType.STANDARD
+    room_number: Optional[int] = Field(None, gt=0)
     description: Optional[str] = None
-    total_rows: int = Field(..., gt=0, le=30)
-    total_cols: int = Field(..., gt=0, le=50)
+    total_rows: int = Field(10, gt=0, le=30)
+    total_cols: int = Field(15, gt=0, le=50)
 
 
 class RoomCreate(RoomBase):
@@ -35,12 +36,15 @@ class RoomCreate(RoomBase):
 class RoomUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     room_type: Optional[RoomType] = None
+    room_number: Optional[int] = Field(None, gt=0)
     description: Optional[str] = None
     is_active: Optional[bool] = None
 
 
 class RoomResponse(RoomBase):
     id: int
+    name: str
+    room_number: Optional[int] = 1
     is_active: bool
     total_seats: int
     created_at: datetime

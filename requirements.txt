@@ -6,6 +6,7 @@ python-multipart==0.0.9
 # Database
 sqlalchemy==2.0.31
 asyncpg==0.29.0
+psycopg2-binary==2.9.9
 alembic==1.13.2
 
 # Redis

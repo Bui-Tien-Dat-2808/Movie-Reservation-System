@@ -12,7 +12,7 @@ from app.models.movie import Movie, MovieGenre, MovieStatus
 from app.models.seat import Seat
 from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
-from app.models.room import Room
+from app.models.room import Room, RoomType
 from app.schemas.showtime import ShowtimeCreate, ShowtimeUpdate
 from app.services.cache_service import CacheService
 from app.utils.pagination import PaginationParams
@@ -340,19 +340,43 @@ class ShowtimeService:
         if end_d < start_d:
             raise ValidationException("end_date must be greater than or equal to start_date")
 
+        from decimal import Decimal
+        from app.models.room import RoomType
+
+        ROOM_TYPE_MULTIPLIERS = {
+            RoomType.STANDARD: Decimal("1.0"),
+            RoomType.KIDS: Decimal("0.9"),
+            RoomType.THREE_D: Decimal("1.3"),
+            RoomType.FOUR_D: Decimal("1.5"),
+            RoomType.IMAX: Decimal("1.7"),
+            RoomType.VIP: Decimal("1.8"),
+        }
+
+        ROOM_GENRE_AFFINITY = {
+            RoomType.IMAX: {"Hành Động", "Viễn Tưởng", "Phiêu Lưu", "Kỳ Ảo", "Action", "Sci-Fi", "Adventure", "Fantasy"},
+            RoomType.FOUR_D: {"Hành Động", "Mạo Hiểm", "Kinh Dị", "Đua Xe", "Action", "Horror", "Thriller"},
+            RoomType.THREE_D: {"Hoạt Hình", "Viễn Tưởng", "Kỳ Ảo", "Animation", "Sci-Fi", "Fantasy"},
+            RoomType.KIDS: {"Hoạt Hình", "Gia Đình", "Thiếu Nhi", "Animation", "Family"},
+            RoomType.VIP: {"Tình Cảm", "Tâm Lý", "Hài", "Nghệ Thuật", "Romance", "Drama", "Comedy"},
+            RoomType.STANDARD: set(),
+        }
+
+        movie_query = (
+            select(Movie)
+            .where(Movie.is_active == True)
+            .options(
+                selectinload(Movie.movie_genres).selectinload(MovieGenre.genre)
+            )
+        )
         if req.movie_ids:
-            movie_res = await self.db.execute(
-                select(Movie).where(Movie.id.in_(req.movie_ids), Movie.is_active == True)
-            )
-            movies = movie_res.scalars().all()
+            movie_query = movie_query.where(Movie.id.in_(req.movie_ids))
         else:
-            movie_res = await self.db.execute(
-                select(Movie).where(
-                    Movie.status.in_([MovieStatus.NOW_SHOWING, MovieStatus.COMING_SOON]),
-                    Movie.is_active == True,
-                )
+            movie_query = movie_query.where(
+                Movie.status.in_([MovieStatus.NOW_SHOWING, MovieStatus.COMING_SOON])
             )
-            movies = movie_res.scalars().all()
+
+        movie_res = await self.db.execute(movie_query)
+        movies = movie_res.scalars().all()
 
         if not movies:
             raise ValidationException("No active movies found for auto-scheduling")
@@ -370,15 +394,70 @@ class ShowtimeService:
             raise ValidationException("No active screening rooms found")
 
         proposed_list = []
-        movie_idx = 0
+        movie_idx_by_type: dict = {}
         now_utc = datetime.now(timezone.utc)
 
         from app.utils.datetime_utils import ensure_utc, get_cinema_timezone
         cinema_tz = get_cinema_timezone()
 
+        KIDS_SAFE_RATINGS = {"P", "K", "T13", "G", "PG", "PG-13"}
+
         curr_d = start_d
         while curr_d <= end_d:
             for room in rooms:
+                # Dynamic Pricing Multiplier
+                if getattr(req, "auto_pricing_by_room_type", True):
+                    mult = ROOM_TYPE_MULTIPLIERS.get(room.room_type, Decimal("1.0"))
+                    calc_base = (req.base_price * mult).quantize(Decimal("1000"))
+                    calc_vip = (req.vip_price * mult).quantize(Decimal("1000"))
+                else:
+                    calc_base = req.base_price
+                    calc_vip = req.vip_price
+
+                # Smart Genre Matching & Kids Safety Guard
+                affinity_set = ROOM_GENRE_AFFINITY.get(room.room_type, set())
+
+                if room.room_type == RoomType.KIDS:
+                    safe_movies = []
+                    for movie in movies:
+                        r = (movie.rating or "").upper().strip()
+                        is_safe_rating = not r or r in KIDS_SAFE_RATINGS
+                        m_genres = {mg.genre.name for mg in movie.movie_genres if mg.genre}
+                        has_kids_genre = bool(m_genres.intersection(affinity_set))
+                        if is_safe_rating and has_kids_genre:
+                            safe_movies.append(movie)
+
+                    if not safe_movies:
+                        # Safety Rule: NEVER fallback to all movies for Kids rooms! Skip room if no kids-safe movies exist.
+                        continue
+
+                    effective_movies = safe_movies
+                    genre_lookup = {}
+                    for m in safe_movies:
+                        matched = list({mg.genre.name for mg in m.movie_genres if mg.genre}.intersection(affinity_set))
+                        if matched:
+                            genre_lookup[m.id] = matched[0]
+                else:
+                    matched_pairs = []
+                    if getattr(req, "smart_genre_matching", True) and affinity_set:
+                        for movie in movies:
+                            m_genres = {mg.genre.name for mg in movie.movie_genres if mg.genre}
+                            common = m_genres.intersection(affinity_set)
+                            if common:
+                                matched_pairs.append((movie, list(common)[0]))
+
+                    if matched_pairs:
+                        effective_movies = [p[0] for p in matched_pairs]
+                        genre_lookup = {p[0].id: p[1] for p in matched_pairs}
+                    else:
+                        effective_movies = movies
+                        genre_lookup = {}
+
+                # Track movie rotation index independently by Room Type for consistent distribution across multiple rooms
+                # TODO: Consider weighted popularity distribution (TMDB popularity score) for prime time slot allocation
+                idx_key = room.room_type
+                movie_idx = movie_idx_by_type.get(idx_key, 0)
+
                 start_dt_bound = datetime.combine(curr_d, time_cls(0, 0), tzinfo=cinema_tz).astimezone(timezone.utc)
                 end_dt_bound = datetime.combine(curr_d, time_cls(23, 59, 59), tzinfo=cinema_tz).astimezone(timezone.utc)
 
@@ -422,7 +501,7 @@ class ShowtimeService:
                         slot_time += timedelta(minutes=30)
                         continue
 
-                    m = movies[movie_idx % len(movies)]
+                    m = effective_movies[movie_idx % len(effective_movies)]
                     duration_mins = m.duration_minutes or 120
                     st_end = slot_time + timedelta(minutes=duration_mins)
 
@@ -441,21 +520,28 @@ class ShowtimeService:
                     if st_end > day_end_dt:
                         break
 
+                    matched_g = genre_lookup.get(m.id)
+
                     proposed_list.append(
                         ProposedShowtimeItem(
                             movie_id=m.id,
                             movie_title=m.title,
                             room_id=room.id,
                             room_name=room.name,
+                            room_type=room.room_type.value if hasattr(room.room_type, "value") else str(room.room_type),
+                            matched_genre=matched_g,
                             start_time=slot_time,
                             end_time=st_end,
-                            base_price=req.base_price,
-                            vip_price=req.vip_price,
+                            base_price=calc_base,
+                            vip_price=calc_vip,
                         )
                     )
 
                     slot_time = st_end + timedelta(minutes=req.buffer_minutes)
                     movie_idx += 1
+
+                # Persist rotation index for this room type
+                movie_idx_by_type[idx_key] = movie_idx
 
             curr_d += timedelta(days=1)
 

@@ -1,7 +1,7 @@
 import enum
 from typing import List, Optional
 
-from sqlalchemy import Boolean, Enum, Integer, String, Text
+from sqlalchemy import Boolean, Enum, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -18,11 +18,15 @@ class RoomType(str, enum.Enum):
 
 class Room(Base):
     __tablename__ = "rooms"
+    __table_args__ = (
+        UniqueConstraint("room_type", "room_number", name="uq_rooms_type_number"),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     room_type: Mapped[RoomType] = mapped_column(
         Enum(RoomType), default=RoomType.STANDARD, nullable=False
     )
+    room_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     total_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     total_cols: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
@@ -38,7 +42,7 @@ class Room(Base):
 
     @property
     def total_seats(self) -> int:
-        return len(self.seats)
+        return self.total_rows * self.total_cols
 
     def __repr__(self) -> str:
         return f"<Room id={self.id} name={self.name} type={self.room_type}>"
