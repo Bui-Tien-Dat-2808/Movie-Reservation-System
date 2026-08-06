@@ -87,7 +87,9 @@ class ReservationService:
         for ss in locked_seats:
             seat_result = await self.db.execute(select(Seat).where(Seat.id == ss.seat_id))
             seat = seat_result.scalar_one()
-            if seat.seat_type == SeatType.VIP and showtime.vip_price:
+            if seat.seat_type == SeatType.COUPLE:
+                price = showtime.couple_price or (showtime.vip_price * Decimal("1.25") if showtime.vip_price else showtime.base_price * Decimal("1.8"))
+            elif seat.seat_type == SeatType.VIP and showtime.vip_price:
                 price = showtime.vip_price
             else:
                 price = showtime.base_price
@@ -142,6 +144,11 @@ class ReservationService:
             )
             self.db.add(rs)
 
+        # Generate unique 6-character random alphanumeric ticket code (e.g. CVN-W1E8KG)
+        import secrets, string
+        chars = string.ascii_uppercase + string.digits
+        rand_code = ''.join(secrets.choice(chars) for _ in range(6))
+        reservation.ticket_code = f"CVN-{rand_code}"
         await self.db.flush()
 
         # Load full reservation with relationships
@@ -216,16 +223,27 @@ class ReservationService:
         return reservation
 
     async def cancel_reservation(self, reservation_id: int, user_id: int) -> Reservation:
-        """Cancel a reservation (only if showtime is upcoming)."""
+        """Cancel a reservation (only if showtime is at least 30 minutes in the future)."""
         reservation = await self.get_reservation(reservation_id, user_id)
 
         if reservation.status == ReservationStatus.CANCELLED:
             raise ReservationNotCancellableException()
 
-        # Check showtime is in the future
+        # Check showtime is at least 30 minutes in the future
         showtime = await self.db.get(Showtime, reservation.showtime_id)
-        if ensure_utc(showtime.start_time) <= datetime.now(timezone.utc):
-            raise ReservationNotCancellableException()
+        from datetime import datetime, timezone, timedelta
+        from app.utils.datetime_utils import ensure_utc
+        from app.config import settings
+
+        now = datetime.now(timezone.utc)
+        min_mins = getattr(settings, "MIN_MINUTES_BEFORE_CANCEL_OR_EXCHANGE", 30)
+        cutoff = ensure_utc(showtime.start_time) - timedelta(minutes=min_mins)
+
+        if now >= cutoff:
+            from app.core.exceptions import ValidationException
+            raise ValidationException(
+                f"Vé chỉ có thể hủy trước giờ chiếu tối thiểu {min_mins} phút."
+            )
 
         # Free up the seats
         for rs in reservation.reservation_seats:
@@ -242,6 +260,63 @@ class ReservationService:
         await self.cache.delete_pattern(f"showtimes:seats:{reservation.showtime_id}")
         logger.info("Reservation cancelled", reservation_id=reservation_id, user_id=user_id)
         return reservation
+
+    async def exchange_reservation(
+        self, reservation_id: int, user_id: int, data
+    ) -> Reservation:
+        """Exchange an existing confirmed reservation for a new showtime & seats."""
+        old_reservation = await self.get_reservation(reservation_id, user_id=user_id)
+        if old_reservation.status != ReservationStatus.CONFIRMED:
+            from app.core.exceptions import ValidationException
+            raise ValidationException("Only CONFIRMED reservations can be exchanged.")
+
+        # Check time limit before old showtime start (at least 30 mins)
+        from datetime import datetime, timezone, timedelta
+        from app.utils.datetime_utils import ensure_utc
+        from app.config import settings
+        now = datetime.now(timezone.utc)
+        min_mins = getattr(settings, "MIN_MINUTES_BEFORE_CANCEL_OR_EXCHANGE", 30)
+        cutoff = old_reservation.showtime.start_time - timedelta(minutes=min_mins)
+
+        if ensure_utc(now) >= ensure_utc(cutoff):
+            from app.core.exceptions import ValidationException
+            raise ValidationException(
+                f"Vé chỉ có thể đổi sang suất khác trước giờ chiếu tối thiểu {min_mins} phút."
+            )
+
+        # 1. Release old seats
+        for rs in old_reservation.reservation_seats:
+            ss_result = await self.db.execute(
+                select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id)
+            )
+            ss = ss_result.scalar_one_or_none()
+            if ss:
+                ss.status = SeatStatus.AVAILABLE
+
+        # Mark old reservation as EXCHANGED
+        old_reservation.status = ReservationStatus.EXCHANGED
+        old_reservation.notes = f"Exchanged to new showtime ID {data.new_showtime_id}"
+        await self.db.flush()
+
+        await self.cache.delete_pattern(f"showtimes:seats:{old_reservation.showtime_id}")
+
+        # 2. Create new reservation
+        from app.schemas.reservation import ReservationCreate
+        new_res_create = ReservationCreate(
+            showtime_id=data.new_showtime_id,
+            seat_ids=data.new_seat_ids,
+            voucher_code=old_reservation.voucher_code,
+        )
+
+        new_reservation = await self.create_reservation(user_id=user_id, data=new_res_create)
+
+        logger.info(
+            "Reservation exchanged successfully",
+            old_reservation_id=reservation_id,
+            new_reservation_id=new_reservation.id,
+            user_id=user_id,
+        )
+        return new_reservation
 
     async def get_all_reservations(
         self, pagination: PaginationParams
@@ -344,3 +419,72 @@ class ReservationService:
             })
 
         return report
+
+    async def get_reservation_by_code(self, ticket_code: str) -> Optional[Reservation]:
+        """Fetch reservation by ticket code with full relationships loaded."""
+        from sqlalchemy.orm import selectinload
+        stmt = (
+            select(Reservation)
+            .where(Reservation.ticket_code == ticket_code.strip())
+            .options(
+                selectinload(Reservation.user),
+                selectinload(Reservation.showtime).selectinload(Showtime.movie),
+                selectinload(Reservation.showtime).selectinload(Showtime.room),
+                selectinload(Reservation.reservation_seats).selectinload(ReservationSeat.showtime_seat).selectinload(ShowtimeSeat.seat),
+            )
+        )
+        res = await self.db.execute(stmt)
+        return res.scalar_one_or_none()
+
+    async def verify_ticket(self, ticket_code: str) -> dict:
+        """Verify ticket validity for staff scanner."""
+        reservation = await self.get_reservation_by_code(ticket_code)
+        if not reservation:
+            return {"valid": False, "status_code": "NOT_FOUND", "message": f"Mã vé '{ticket_code}' không tồn tại trên hệ thống!"}
+
+        if reservation.status == ReservationStatus.CANCELLED:
+            return {
+                "valid": False,
+                "status_code": "CANCELLED",
+                "message": "Vé này đã bị HỦY trước đó!",
+                "reservation": ReservationResponse.model_validate(reservation),
+            }
+
+        if reservation.is_used:
+            return {
+                "valid": False,
+                "status_code": "CHECKED_IN",
+                "message": f"Vé này ĐÃ ĐƯỢC QUÉT VÀO RẠP lúc {reservation.checked_in_at.strftime('%H:%M %d/%m/%Y') if reservation.checked_in_at else 'N/A'}!",
+                "reservation": ReservationResponse.model_validate(reservation),
+            }
+
+        return {
+            "valid": True,
+            "status_code": "VALID",
+            "message": "Vé HỢP LỆ! Sẵn sàng check-in cho khán giả.",
+            "reservation": ReservationResponse.model_validate(reservation),
+        }
+
+    async def check_in_ticket(self, ticket_code: str) -> dict:
+        """Mark a ticket as checked in (is_used = True)."""
+        reservation = await self.get_reservation_by_code(ticket_code)
+        if not reservation:
+            raise NotFoundException(f"Vé với mã '{ticket_code}' không tồn tại.")
+
+        if reservation.status == ReservationStatus.CANCELLED:
+            raise ValidationException("Vé này đã bị hủy, không thể check-in vào rạp.")
+
+        if reservation.is_used:
+            raise ValidationException(f"Vé này đã được quét check-in từ trước vào lúc {reservation.checked_in_at.strftime('%H:%M %d/%m/%Y') if reservation.checked_in_at else ''}.")
+
+        reservation.is_used = True
+        reservation.checked_in_at = datetime.now(timezone.utc)
+        self.db.add(reservation)
+        await self.db.commit()
+        await self.db.refresh(reservation)
+
+        return {
+            "success": True,
+            "message": "✅ Check-in vé thành công! Khán giả đã vào rạp.",
+            "reservation": ReservationResponse.model_validate(reservation),
+        }

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     API_V1_PREFIX: str = "/api/v1"
     CINEMA_TIMEZONE: str = "Asia/Ho_Chi_Minh"
+    MIN_MINUTES_BEFORE_CANCEL_OR_EXCHANGE: int = 30
 
     # Database
     DATABASE_URL: str
@@ -57,6 +58,17 @@ class Settings(BaseSettings):
     @property
     def allowed_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",")]
+
+    @property
+    def effective_database_url(self) -> str:
+        url = self.DATABASE_URL
+        if "@db:" in url:
+            import socket
+            try:
+                socket.gethostbyname("db")
+            except socket.gaierror:
+                url = url.replace("@db:", "@localhost:")
+        return url
 
 
 @lru_cache()

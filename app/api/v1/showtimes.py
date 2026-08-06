@@ -42,13 +42,14 @@ async def list_showtimes(
     movie_id: Optional[int] = Query(None, description="Filter by movie"),
     room_id: Optional[int] = Query(None, description="Filter by screening room"),
     date: Optional[str] = Query(None, description="Filter by date (YYYY-MM-DD)"),
+    upcoming_only: bool = Query(False, description="Exclude past showtimes that already started"),
     service: ShowtimeService = Depends(get_showtime_service),
 ):
     """
     List showtimes with optional filters.
     Filter by movie, room, or specific date.
     """
-    items, total = await service.get_showtimes(pagination, movie_id, room_id, date)
+    items, total = await service.get_showtimes(pagination, movie_id, room_id, date, upcoming_only=upcoming_only)
     return paginate(items, total, pagination.page, pagination.page_size)
 
 

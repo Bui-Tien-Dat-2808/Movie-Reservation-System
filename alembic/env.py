@@ -20,8 +20,16 @@ from app.models import (  # noqa: F401
 
 config = context.config
 
-# Override URL from settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL_SYNC)
+# Override URL from settings (replace @db: with @localhost: if running on local host)
+db_url_sync = settings.DATABASE_URL_SYNC
+if "@db:" in db_url_sync:
+    import socket
+    try:
+        socket.gethostbyname("db")
+    except socket.gaierror:
+        db_url_sync = db_url_sync.replace("@db:", "@localhost:")
+
+config.set_main_option("sqlalchemy.url", db_url_sync)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

@@ -37,14 +37,22 @@ class ReservationCreate(BaseModel):
     voucher_code: Optional[str] = None
 
 
+class ReservationExchangeRequest(BaseModel):
+    new_showtime_id: int
+    new_seat_ids: List[int] = Field(..., min_length=1, max_length=10)
+
+
 class ReservationResponse(BaseModel):
     id: int
     showtime_id: int
     user_id: int
+    ticket_code: Optional[str] = None
     total_price: Decimal
     voucher_code: Optional[str] = None
     discount_amount: Decimal = Decimal("0.00")
     status: ReservationStatus
+    is_used: bool = False
+    checked_in_at: Optional[datetime] = None
     notes: Optional[str] = None
     reservation_seats: List[ReservationSeatResponse] = []
     showtime: Optional[ShowtimeSummary] = None
@@ -56,6 +64,7 @@ class ReservationResponse(BaseModel):
 class ReservationListResponse(BaseModel):
     id: int
     showtime_id: int
+    ticket_code: Optional[str] = None
     total_price: Decimal
     voucher_code: Optional[str] = None
     discount_amount: Decimal = Decimal("0.00")

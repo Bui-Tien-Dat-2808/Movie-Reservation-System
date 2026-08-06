@@ -28,7 +28,8 @@ class Showtime(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     base_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    vip_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=True)
+    vip_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    couple_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
     status: Mapped[ShowtimeStatus] = mapped_column(
         Enum(ShowtimeStatus), default=ShowtimeStatus.SCHEDULED, nullable=False
     )

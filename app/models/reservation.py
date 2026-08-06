@@ -1,8 +1,9 @@
 import enum
+from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import Enum, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -12,6 +13,7 @@ class ReservationStatus(str, enum.Enum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
+    EXCHANGED = "exchanged"
 
 
 class Reservation(Base):
@@ -24,11 +26,14 @@ class Reservation(Base):
         Integer, ForeignKey("showtimes.id", ondelete="CASCADE"), nullable=False
     )
     total_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=0)
+    ticket_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, unique=True, index=True)
     voucher_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     status: Mapped[ReservationStatus] = mapped_column(
         Enum(ReservationStatus), default=ReservationStatus.CONFIRMED, nullable=False
     )
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    checked_in_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     # Relationships

@@ -15,6 +15,7 @@ class SeatResponse(BaseModel):
     row_label: str
     col_number: int
     seat_type: SeatType
+    width: int = 1
     label: str
 
     model_config = {"from_attributes": True}
@@ -27,6 +28,8 @@ class RoomBase(BaseModel):
     description: Optional[str] = None
     total_rows: int = Field(10, gt=0, le=30)
     total_cols: int = Field(15, gt=0, le=50)
+    has_couple_seats: bool = Field(True, description="Enable couple seats in the back row")
+    couple_rows_count: int = Field(1, ge=0, le=3, description="Number of couple seat rows at the back")
 
 
 class RoomCreate(RoomBase):

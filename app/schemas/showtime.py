@@ -37,6 +37,7 @@ class ShowtimeBase(BaseModel):
     end_time: datetime
     base_price: Decimal = Field(..., gt=0)
     vip_price: Optional[Decimal] = Field(None, gt=0)
+    couple_price: Optional[Decimal] = Field(None, gt=0)
 
     @model_validator(mode="after")
     def validate_times(self) -> "ShowtimeBase":
@@ -57,6 +58,7 @@ class ShowtimeUpdate(BaseModel):
     end_time: Optional[datetime] = None
     base_price: Optional[Decimal] = Field(None, gt=0)
     vip_price: Optional[Decimal] = Field(None, gt=0)
+    couple_price: Optional[Decimal] = Field(None, gt=0)
     status: Optional[ShowtimeStatus] = None
 
 
@@ -92,8 +94,9 @@ class AutoScheduleRequest(BaseModel):
     start_hour: Optional[int] = Field(8, ge=0, le=23)
     end_hour: Optional[int] = Field(23, ge=0, le=23)
     buffer_minutes: int = Field(15, ge=0, le=60)
-    base_price: Decimal = Field(Decimal("90000.0"), gt=0)
-    vip_price: Decimal = Field(Decimal("120000.0"), gt=0)
+    base_price: Decimal = Field(Decimal("90000"), gt=0)
+    vip_price: Decimal = Field(Decimal("120000"), gt=0)
+    couple_price: Optional[Decimal] = Field(Decimal("180000"), gt=0)
     replace_existing: bool = True
     smart_genre_matching: bool = True
     auto_pricing_by_room_type: bool = True
@@ -110,6 +113,7 @@ class ProposedShowtimeItem(BaseModel):
     end_time: datetime
     base_price: Decimal
     vip_price: Decimal
+    couple_price: Optional[Decimal] = None
 
 
 class AutoScheduleConfirmRequest(BaseModel):

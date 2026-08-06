@@ -65,12 +65,17 @@ class ShowtimeService:
         movie_id: Optional[int] = None,
         room_id: Optional[int] = None,
         date: Optional[str] = None,
+        upcoming_only: bool = False,
     ) -> tuple[List[dict], int]:
         """List showtimes with optional filters using high performance SQL aggregation."""
         from sqlalchemy import Integer
         from app.schemas.showtime import ShowtimeResponse
 
         query = select(Showtime).where(Showtime.status != ShowtimeStatus.CANCELLED)
+
+        if upcoming_only:
+            now_utc = datetime.now(timezone.utc)
+            query = query.where(Showtime.start_time > now_utc)
 
         if movie_id:
             query = query.where(Showtime.movie_id == movie_id)

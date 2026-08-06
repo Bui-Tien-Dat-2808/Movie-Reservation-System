@@ -1,4 +1,5 @@
 from typing import List
+from pydantic import BaseModel
 
 import structlog
 from fastapi import APIRouter, Depends, status
@@ -9,6 +10,7 @@ from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.schemas.reservation import (
     ReservationCreate,
+    ReservationExchangeRequest,
     ReservationListResponse,
     ReservationResponse,
     RevenueReportResponse,
@@ -102,6 +104,31 @@ async def cancel_reservation(
     return _build_reservation_response(reservation)
 
 
+@router.post(
+    "/{reservation_id}/exchange",
+    response_model=ReservationResponse,
+    summary="Exchange reservation to another showtime/seats",
+)
+async def exchange_reservation(
+    reservation_id: int,
+    data: ReservationExchangeRequest,
+    current_user: User = Depends(get_current_active_user),
+    service: ReservationService = Depends(get_reservation_service),
+):
+    """
+    Exchange an existing confirmed reservation for a new showtime and seats.
+    - Frees up old seats
+    - Creates a new reservation for the new showtime
+    - Marks old reservation as EXCHANGED
+    """
+    new_reservation = await service.exchange_reservation(
+        reservation_id=reservation_id,
+        user_id=current_user.id,
+        data=data,
+    )
+    return _build_reservation_response(new_reservation)
+
+
 # ─── Admin Endpoints ───────────────────────────────────────────────────────────
 
 @router.get(
@@ -180,14 +207,49 @@ def _build_reservation_response(reservation) -> ReservationResponse:
             end_time=st.end_time,
         )
 
+    if not reservation.ticket_code:
+        import hashlib
+        # Deterministic 6-character code derived from reservation.id so it NEVER changes on reload
+        hash_hex = hashlib.md5(f"CVN-TICKET-{reservation.id}".encode()).hexdigest().upper()
+        ticket_code = f"CVN-{hash_hex[:6]}"
+    else:
+        ticket_code = reservation.ticket_code
+
     return ReservationResponse(
         id=reservation.id,
         showtime_id=reservation.showtime_id,
         user_id=reservation.user_id,
+        ticket_code=ticket_code,
         total_price=reservation.total_price,
         status=reservation.status,
+        is_used=reservation.is_used,
+        checked_in_at=reservation.checked_in_at,
         notes=reservation.notes,
         reservation_seats=seats,
         showtime=showtime_summary,
         created_at=reservation.created_at,
     )
+
+
+class TicketVerifyRequest(BaseModel):
+    ticket_code: str
+
+
+@router.post("/verify-ticket", summary="Verify ticket validity by code or QR payload")
+async def verify_ticket(
+    body: TicketVerifyRequest,
+    current_user: User = Depends(require_admin),
+    service: ReservationService = Depends(get_reservation_service),
+):
+    """Verify if ticket is valid, cancelled, or already checked-in."""
+    return await service.verify_ticket(body.ticket_code)
+
+
+@router.post("/check-in", summary="Staff check-in ticket (mark as used)")
+async def check_in_ticket(
+    body: TicketVerifyRequest,
+    current_user: User = Depends(require_admin),
+    service: ReservationService = Depends(get_reservation_service),
+):
+    """Mark ticket as checked in / used for gate entry."""
+    return await service.check_in_ticket(body.ticket_code)

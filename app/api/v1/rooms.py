@@ -22,23 +22,40 @@ router = APIRouter(prefix="/rooms", tags=["Rooms"])
 logger = structlog.get_logger()
 
 
-async def _generate_seats(db: AsyncSession, room: Room) -> None:
-    """Auto-generate seats for a room based on rows x cols layout."""
+async def _generate_seats(db: AsyncSession, room: Room, couple_rows: int = 1) -> None:
+    """Auto-generate seats for a room based on rows x cols layout with Couple Seats in back rows."""
     row_labels = list(string.ascii_uppercase)  # A-Z
-    for row_idx in range(room.total_rows):
+    total_rows = room.total_rows
+
+    for row_idx in range(total_rows):
         row_label = row_labels[row_idx] if row_idx < 26 else f"A{row_idx - 25}"
-        for col in range(1, room.total_cols + 1):
-            # VIP seats in the middle rows
-            is_vip_row = room.total_rows // 3 <= row_idx < 2 * room.total_rows // 3
-            seat_type = SeatType.VIP if is_vip_row else SeatType.STANDARD
-            seat = Seat(
-                room_id=room.id,
-                row_label=row_label,
-                col_number=col,
-                seat_type=seat_type,
-                is_active=True,
-            )
-            db.add(seat)
+        is_couple_row = (row_idx >= total_rows - couple_rows) if couple_rows > 0 and total_rows >= 3 else False
+        is_vip_row = not is_couple_row and (total_rows // 3 <= row_idx < 2 * total_rows // 3)
+
+        if is_couple_row:
+            num_couples = max(1, room.total_cols // 2)
+            for c_idx in range(1, num_couples + 1):
+                seat = Seat(
+                    room_id=room.id,
+                    row_label=row_label,
+                    col_number=c_idx,
+                    seat_type=SeatType.COUPLE,
+                    width=2,
+                    is_active=True,
+                )
+                db.add(seat)
+        else:
+            for col in range(1, room.total_cols + 1):
+                seat_type = SeatType.VIP if is_vip_row else SeatType.STANDARD
+                seat = Seat(
+                    room_id=room.id,
+                    row_label=row_label,
+                    col_number=col,
+                    seat_type=seat_type,
+                    width=1,
+                    is_active=True,
+                )
+                db.add(seat)
     await db.flush()
 
 

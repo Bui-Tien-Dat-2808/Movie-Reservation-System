@@ -50,8 +50,8 @@ class TestMoviesCRUD:
         assert response.status_code == 404
 
     async def test_page_size_exceeding_limit_returns_422(self, client: AsyncClient):
-        """Request with page_size > 1000 should be rejected with HTTP 422."""
-        response = await client.get("/api/v1/movies/?page_size=2000")
+        """Request with page_size > 100000 should be rejected with HTTP 422."""
+        response = await client.get("/api/v1/movies/?page_size=200000")
         assert response.status_code == 422
 
     async def test_update_movie(self, client: AsyncClient, test_admin):

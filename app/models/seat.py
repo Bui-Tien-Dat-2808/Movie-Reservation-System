@@ -24,6 +24,7 @@ class Seat(Base):
     seat_type: Mapped[SeatType] = mapped_column(
         Enum(SeatType), default=SeatType.STANDARD, nullable=False
     )
+    width: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # 1 for standard/VIP, 2 for Couple
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Relationships
