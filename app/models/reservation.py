@@ -45,13 +45,6 @@ class Reservation(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    reservation_concessions: Mapped[List["ReservationConcession"]] = relationship(  # noqa: F821
-        "ReservationConcession",
-        back_populates="reservation",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
-
 
     def __repr__(self) -> str:
         return f"<Reservation id={self.id} user={self.user_id} status={self.status}>"
