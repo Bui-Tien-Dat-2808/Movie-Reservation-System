@@ -16,6 +16,7 @@ from app.core.exceptions import (
 from app.models.reservation import Reservation, ReservationSeat, ReservationStatus
 from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+from app.models.concession import ReservationConcession
 from app.schemas.reservation import ReservationCreate
 from app.services.cache_service import CacheService
 from app.utils.datetime_utils import ensure_utc
@@ -149,6 +150,19 @@ class ReservationService:
         chars = string.ascii_uppercase + string.digits
         rand_code = ''.join(secrets.choice(chars) for _ in range(6))
         reservation.ticket_code = f"CVN-{rand_code}"
+
+        # Process concession orders if any
+        concession_total = Decimal("0.00")
+        if data.concession_orders:
+            from app.services.concession_service import ConcessionService
+            concession_service = ConcessionService(self.db)
+            concession_total = await concession_service.process_concession_orders(
+                reservation_id=reservation.id,
+                orders=data.concession_orders,
+            )
+            # Add concession cost to final total
+            reservation.total_price = final_total + concession_total
+
         await self.db.flush()
 
         # Load full reservation with relationships
@@ -163,6 +177,7 @@ class ReservationService:
                 .selectinload(Showtime.movie),
                 selectinload(Reservation.showtime)
                 .selectinload(Showtime.room),
+                selectinload(Reservation.reservation_concessions),
             )
         )
         full_reservation = result.scalar_one()

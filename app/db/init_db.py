@@ -8,7 +8,7 @@ from app.db.session import engine, AsyncSessionLocal
 from app.models.user import User, UserRole
 
 # Import all models so Alembic and Base.metadata can find them
-from app.models import movie, genre, room, seat, showtime, showtime_seat, reservation  # noqa: F401
+from app.models import movie, genre, room, seat, showtime, showtime_seat, reservation, concession  # noqa: F401
 
 logger = structlog.get_logger()
 
@@ -20,6 +20,7 @@ async def init_db() -> None:
     await _seed_tmdb_movies()
     await _seed_showtimes()
     await _seed_vouchers()
+    await _seed_concessions()
     logger.info("Database initialized successfully")
 
 
@@ -302,4 +303,11 @@ async def _seed_vouchers() -> None:
         db.add_all(vouchers)
         await db.commit()
         logger.info("Default vouchers created", count=len(vouchers))
+
+
+async def _seed_concessions() -> None:
+    """Seed default concession items if none exist."""
+    from app.services.concession_service import ConcessionService
+    async with AsyncSessionLocal() as db:
+        await ConcessionService.seed_defaults(db)
 

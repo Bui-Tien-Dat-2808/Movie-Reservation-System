@@ -8,6 +8,7 @@ from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
 from app.models.reservation import Reservation, ReservationSeat, ReservationStatus
 from app.models.voucher import Voucher, VoucherDiscountType, VoucherRedemption
+from app.models.concession import Concession, ReservationConcession, ConcessionCategory
 
 __all__ = [
     "User", "UserRole",
@@ -19,4 +20,5 @@ __all__ = [
     "ShowtimeSeat", "SeatStatus",
     "Reservation", "ReservationSeat", "ReservationStatus",
     "Voucher", "VoucherDiscountType", "VoucherRedemption",
+    "Concession", "ReservationConcession", "ConcessionCategory",
 ]
