@@ -26,9 +26,10 @@ async def list_loyalty_users(
     current_user: User = Depends(require_admin),
     q: str | None = Query(default=None),
 ):
+    from app.models.user import UserRole
     from sqlalchemy import select
 
-    query = select(User).order_by(User.loyalty_points.desc(), User.id)
+    query = select(User).where(User.role != UserRole.ADMIN).order_by(User.loyalty_points.desc(), User.id)
     if q:
         query = query.where(
             (User.full_name.ilike(f"%{q}%")) | (User.email.ilike(f"%{q}%"))

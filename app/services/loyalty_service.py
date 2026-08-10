@@ -29,32 +29,44 @@ class LoyaltyService:
             return "silver"
         return "bronze"
 
-    @staticmethod
-    def points_to_next_tier(points: int) -> int:
-        tier = LoyaltyService.calculate_tier(points)
+    @classmethod
+    def points_to_next_tier(cls, points: int) -> int:
+        tier = cls.calculate_tier(points)
         if tier == "bronze":
-            return max(0, 1000 - points)
+            return max(0, cls.TIERS["silver"]["min"] - points)
         if tier == "silver":
-            return max(0, 5000 - points)
+            return max(0, cls.TIERS["gold"]["min"] - points)
         if tier == "gold":
-            return max(0, 10000 - points)
+            return max(0, cls.TIERS["diamond"]["min"] - points)
         return 0
 
-    @staticmethod
-    def tier_info(points: int) -> dict:
-        tier = LoyaltyService.calculate_tier(points)
+    @classmethod
+    def tier_info(cls, points: int) -> dict:
+        tier = cls.calculate_tier(points)
         return {
             "tier": tier,
-            "label": LoyaltyService.TIERS[tier]["label"],
-            "color": LoyaltyService.TIERS[tier]["color"],
-            "icon": LoyaltyService.TIERS[tier]["icon"],
-            "points_to_next_tier": LoyaltyService.points_to_next_tier(points),
+            "label": cls.TIERS[tier]["label"],
+            "color": cls.TIERS[tier]["color"],
+            "icon": cls.TIERS[tier]["icon"],
+            "points_to_next_tier": cls.points_to_next_tier(points),
         }
 
     @classmethod
     async def award_points(cls, db: AsyncSession, reservation: Reservation) -> None:
+        """Award points to user when a reservation is confirmed. Prevents duplicate awards."""
         if reservation.status != ReservationStatus.CONFIRMED:
             return
+
+        # Check if points were already awarded for this reservation
+        existing_tx_result = await db.execute(
+            select(PointTransaction).where(
+                PointTransaction.reservation_id == reservation.id,
+                PointTransaction.user_id == reservation.user_id,
+                PointTransaction.points > 0,
+            )
+        )
+        if existing_tx_result.scalar_one_or_none():
+            return  # Already awarded
 
         user_result = await db.execute(select(User).where(User.id == reservation.user_id))
         user = user_result.scalar_one_or_none()
@@ -77,7 +89,51 @@ class LoyaltyService:
             created_at=datetime.now(timezone.utc),
         )
         db.add(transaction)
-        await db.commit()
+        await db.flush()
+
+    @classmethod
+    async def revoke_points(cls, db: AsyncSession, reservation: Reservation) -> None:
+        """Revoke awarded points when a reservation is cancelled or refunded."""
+        awarded_tx_result = await db.execute(
+            select(PointTransaction).where(
+                PointTransaction.reservation_id == reservation.id,
+                PointTransaction.user_id == reservation.user_id,
+                PointTransaction.points > 0,
+            )
+        )
+        awarded_tx = awarded_tx_result.scalar_one_or_none()
+        if not awarded_tx:
+            return  # No points awarded to revoke
+
+        # Check if already revoked
+        revoked_tx_result = await db.execute(
+            select(PointTransaction).where(
+                PointTransaction.reservation_id == reservation.id,
+                PointTransaction.user_id == reservation.user_id,
+                PointTransaction.points < 0,
+            )
+        )
+        if revoked_tx_result.scalar_one_or_none():
+            return  # Already revoked
+
+        user_result = await db.execute(select(User).where(User.id == reservation.user_id))
+        user = user_result.scalar_one_or_none()
+        if not user:
+            return
+
+        points_to_revoke = awarded_tx.points
+        user.loyalty_points = max(0, (user.loyalty_points or 0) - points_to_revoke)
+        user.loyalty_tier = cls.calculate_tier(user.loyalty_points)
+
+        transaction = PointTransaction(
+            user_id=user.id,
+            reservation_id=reservation.id,
+            points=-points_to_revoke,
+            reason="refund",
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(transaction)
+        await db.flush()
 
     @classmethod
     async def adjust_points(cls, db: AsyncSession, user_id: int, points: int, reason: str) -> PointTransaction:
@@ -86,8 +142,8 @@ class LoyaltyService:
         if not user:
             raise ValueError("User not found")
 
-        user.loyalty_points = (user.loyalty_points or 0) + points
-        user.loyalty_tier = LoyaltyService.calculate_tier(user.loyalty_points)
+        user.loyalty_points = max(0, (user.loyalty_points or 0) + points)
+        user.loyalty_tier = cls.calculate_tier(user.loyalty_points)
 
         transaction = PointTransaction(
             user_id=user.id,
@@ -97,7 +153,7 @@ class LoyaltyService:
             created_at=datetime.now(timezone.utc),
         )
         db.add(transaction)
-        await db.commit()
+        await db.flush()
         await db.refresh(transaction)
         return transaction
 

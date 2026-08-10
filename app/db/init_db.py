@@ -8,7 +8,7 @@ from app.db.session import engine, AsyncSessionLocal
 from app.models.user import User, UserRole
 
 # Import all models so Alembic and Base.metadata can find them
-from app.models import movie, genre, room, seat, showtime, showtime_seat, reservation  # noqa: F401
+from app.models import movie, genre, room, seat, showtime, showtime_seat, reservation, loyalty, concession  # noqa: F401
 
 logger = structlog.get_logger()
 

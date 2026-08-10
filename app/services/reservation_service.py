@@ -167,6 +167,10 @@ class ReservationService:
         )
         full_reservation = result.scalar_one()
 
+        # Award loyalty points for booking
+        from app.services.loyalty_service import LoyaltyService
+        await LoyaltyService.award_points(self.db, full_reservation)
+
         # Invalidate seat cache
         await self.cache.delete_pattern(f"showtimes:seats:{data.showtime_id}")
         logger.info(
@@ -256,6 +260,10 @@ class ReservationService:
 
         reservation.status = ReservationStatus.CANCELLED
         await self.db.flush()
+
+        # Revoke loyalty points for cancelled booking
+        from app.services.loyalty_service import LoyaltyService
+        await LoyaltyService.revoke_points(self.db, reservation)
 
         await self.cache.delete_pattern(f"showtimes:seats:{reservation.showtime_id}")
         logger.info("Reservation cancelled", reservation_id=reservation_id, user_id=user_id)
