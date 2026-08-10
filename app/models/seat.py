@@ -11,6 +11,7 @@ class SeatType(str, enum.Enum):
     STANDARD = "standard"
     VIP = "vip"
     COUPLE = "couple"
+    KIDS = "kids"
 
 
 class Seat(Base):
@@ -22,7 +23,7 @@ class Seat(Base):
     row_label: Mapped[str] = mapped_column(String(5), nullable=False)     # e.g., "A", "B", "C"
     col_number: Mapped[int] = mapped_column(Integer, nullable=False)       # e.g., 1, 2, 3
     seat_type: Mapped[SeatType] = mapped_column(
-        Enum(SeatType), default=SeatType.STANDARD, nullable=False
+        Enum(SeatType, values_callable=lambda x: [e.name for e in x]), default=SeatType.STANDARD, nullable=False
     )
     width: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # 1 for standard/VIP, 2 for Couple
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

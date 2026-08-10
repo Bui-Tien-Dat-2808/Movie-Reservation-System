@@ -303,8 +303,22 @@ class ShowtimeService:
         return count
 
     async def get_seat_map(self, showtime_id: int) -> dict:
-        """Get seat availability map for a showtime."""
+        """Get seat availability map for a showtime, with auto-healing for missing seat slots."""
         showtime = await self.get_showtime(showtime_id)
+
+        # Auto-heal: If showtime has no showtime_seats generated, create them from room seats
+        if not showtime.showtime_seats:
+            for seat in showtime.room.seats:
+                if seat.is_active:
+                    st_seat = ShowtimeSeat(
+                        showtime_id=showtime.id,
+                        seat_id=seat.id,
+                        status=SeatStatus.AVAILABLE,
+                    )
+                    self.db.add(st_seat)
+            await self.db.flush()
+            await self.db.commit()
+            showtime = await self.get_showtime(showtime_id)
 
         seats = []
         available_count = 0

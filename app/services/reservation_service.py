@@ -91,6 +91,8 @@ class ReservationService:
                 price = showtime.couple_price or (showtime.vip_price * Decimal("1.25") if showtime.vip_price else showtime.base_price * Decimal("1.8"))
             elif seat.seat_type == SeatType.VIP and showtime.vip_price:
                 price = showtime.vip_price
+            elif seat.seat_type == SeatType.KIDS:
+                price = showtime.base_price * Decimal("0.85")
             else:
                 price = showtime.base_price
             seat_prices[ss.id] = price
