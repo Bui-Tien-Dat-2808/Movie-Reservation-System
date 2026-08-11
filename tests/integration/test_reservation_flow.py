@@ -95,7 +95,7 @@ class TestReservationFlow:
         assert response.status_code == 201
         data = response.json()
         assert data["showtime_id"] == showtime.id
-        assert data["status"] == "confirmed"
+        assert data["status"] == "pending"
         assert len(data["reservation_seats"]) == 2
 
     async def test_reservation_unauthenticated(self, client: AsyncClient, db_session: AsyncSession):

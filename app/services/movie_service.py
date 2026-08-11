@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import structlog
 from sqlalchemy import delete, func, select
@@ -45,7 +45,7 @@ class MovieService:
 
         today = date.today()
         now_utc = datetime.now(timezone.utc)
-        cutoff_date = today - timedelta(days=60)
+        cutoff_date = today - timedelta(days=35)
         changes = 0
 
         # 1. Fetch movie_ids with FUTURE showtimes
@@ -54,41 +54,22 @@ class MovieService:
         )
         future_showtime_movie_ids = set(fut_res.scalars().all())
 
-        # 2. Update COMING_SOON movies
-        cs_res = await self.db.execute(
-            select(Movie).where(Movie.status == MovieStatus.COMING_SOON, Movie.is_active == True)
+        # 2. Query all active movies and update status deterministically
+        res = await self.db.execute(
+            select(Movie).where(Movie.is_active == True)
         )
-        for m in cs_res.scalars().all():
+        movies = list(res.scalars().all())
+
+        for m in movies:
             has_future_st = m.id in future_showtime_movie_ids
             old_status = m.status
-            if m.release_date and m.release_date <= today:
-                m.status = MovieStatus.NOW_SHOWING
-            elif not m.release_date and has_future_st:
-                m.status = MovieStatus.NOW_SHOWING
-            elif m.release_date and m.release_date < cutoff_date and not has_future_st:
-                m.status = MovieStatus.ENDED
 
-            if m.status != old_status:
-                changes += 1
-
-        # 3. Update NOW_SHOWING movies
-        ns_res = await self.db.execute(
-            select(Movie).where(Movie.status == MovieStatus.NOW_SHOWING, Movie.is_active == True)
-        )
-        for m in ns_res.scalars().all():
-            has_future_st = m.id in future_showtime_movie_ids
-            is_old_release = m.release_date and m.release_date < cutoff_date
-            old_status = m.status
-
-            # Future-dated releases should stay in COMING_SOON even if they have
-            # future showtimes. This prevents unreleased films from being exposed
-            # as "now showing" just because they were pre-scheduled.
             if m.release_date and m.release_date > today:
                 m.status = MovieStatus.COMING_SOON
-
-            # Convert to ENDED ONLY if there are no future showtimes left AND release_date is older than 60 days
-            elif not has_future_st and is_old_release:
+            elif m.release_date and m.release_date < cutoff_date and not has_future_st:
                 m.status = MovieStatus.ENDED
+            else:
+                m.status = MovieStatus.NOW_SHOWING
 
             if m.status != old_status:
                 changes += 1
@@ -309,10 +290,11 @@ class MovieService:
         await self.cache.delete(CACHE_KEY_MOVIE.format(id=movie_id))
         logger.info("Movie soft-deleted", movie_id=movie_id)
 
-    async def sync_from_tmdb(self, tmdb_id: int) -> Movie:
-        """Sync movie from TMDB API."""
+    async def sync_from_tmdb(self, tmdb_id: int, tmdb_data: Optional[Dict[str, Any]] = None) -> Movie:
+        """Sync movie from TMDB API (supports pre-fetched tmdb_data)."""
         tmdb_service = TMDBService()
-        tmdb_data = await tmdb_service.get_movie(tmdb_id)
+        if not tmdb_data:
+            tmdb_data = await tmdb_service.get_movie(tmdb_id)
 
         # Check if already exists
         result = await self.db.execute(select(Movie).where(Movie.tmdb_id == tmdb_id))

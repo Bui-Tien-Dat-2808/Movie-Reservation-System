@@ -423,6 +423,11 @@ class ShowtimeService:
 
         curr_d = start_d
         while curr_d <= end_d:
+            # Filter candidate movies whose release_date has arrived on or before curr_d
+            day_movies = [m for m in movies if not m.release_date or m.release_date <= curr_d]
+            if not day_movies:
+                day_movies = movies
+
             for room in rooms:
                 # Dynamic Pricing Multiplier
                 if getattr(req, "auto_pricing_by_room_type", True):
@@ -438,7 +443,7 @@ class ShowtimeService:
 
                 if room.room_type == RoomType.KIDS:
                     safe_movies = []
-                    for movie in movies:
+                    for movie in day_movies:
                         r = (movie.rating or "").upper().strip()
                         is_safe_rating = not r or r in KIDS_SAFE_RATINGS
                         m_genres = {mg.genre.name for mg in movie.movie_genres if mg.genre}
@@ -459,7 +464,7 @@ class ShowtimeService:
                 else:
                     matched_pairs = []
                     if getattr(req, "smart_genre_matching", True) and affinity_set:
-                        for movie in movies:
+                        for movie in day_movies:
                             m_genres = {mg.genre.name for mg in movie.movie_genres if mg.genre}
                             common = m_genres.intersection(affinity_set)
                             if common:
@@ -469,7 +474,7 @@ class ShowtimeService:
                         effective_movies = [p[0] for p in matched_pairs]
                         genre_lookup = {p[0].id: p[1] for p in matched_pairs}
                     else:
-                        effective_movies = movies
+                        effective_movies = day_movies
                         genre_lookup = {}
 
                 # Track movie rotation index independently by Room Type for consistent distribution across multiple rooms

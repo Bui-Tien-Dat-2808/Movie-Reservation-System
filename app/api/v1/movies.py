@@ -59,6 +59,23 @@ async def list_coming_soon(
 
 
 @router.get(
+    "/ended",
+    response_model=PaginatedResponse[MovieResponse],
+    summary="List ended movies",
+)
+async def list_ended(
+    pagination: PaginationParams = Depends(),
+    search: Optional[str] = Query(None, description="Filter by title search"),
+    service: MovieService = Depends(get_movie_service),
+):
+    """Public: List movies that have ended their theatrical run."""
+    movies, total = await service.get_movies(
+        pagination, status=MovieStatus.ENDED, search=search
+    )
+    return paginate(movies, total, pagination.page, pagination.page_size)
+
+
+@router.get(
     "/",
     response_model=PaginatedResponse[MovieResponse],
     summary="List all movies",
@@ -227,14 +244,40 @@ async def auto_sync_tmdb(
     added_new_count = 0
     updated_existing_count = 0
 
+    # Extract target items up to limit
+    target_now_playing = now_playing_list[:limit]
+    target_upcoming = upcoming_list[:limit]
+
+    # Collect all unique TMDB IDs needed
+    all_tmdb_ids = list({item["tmdb_id"] for item in (target_now_playing + target_upcoming)})
+
+    # Pre-fetch all movie details from TMDB API concurrently in parallel (max 8 concurrent connections)
+    import asyncio
+    semaphore = asyncio.Semaphore(8)
+    prefetched_data = {}
+    fetch_errors = {}
+
+    async def fetch_detail(tmdb_id: int):
+        async with semaphore:
+            try:
+                detail = await tmdb.get_movie(tmdb_id)
+                prefetched_data[tmdb_id] = detail
+            except Exception as e:
+                fetch_errors[tmdb_id] = str(e)
+
+    if all_tmdb_ids:
+        await asyncio.gather(*(fetch_detail(tid) for tid in all_tmdb_ids))
+
     # 1. Sync Now Playing
-    now_synced = 0
-    for item in now_playing_list:
-        if now_synced >= limit:
-            break
+    for item in target_now_playing:
+        tmdb_id = item["tmdb_id"]
+        if tmdb_id in fetch_errors:
+            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": fetch_errors[tmdb_id]})
+            continue
+
         try:
             existing_res = await service.db.execute(
-                select(Movie).where(Movie.tmdb_id == item["tmdb_id"])
+                select(Movie).where(Movie.tmdb_id == tmdb_id)
             )
             ex = existing_res.scalar_one_or_none()
             if not ex:
@@ -242,47 +285,51 @@ async def auto_sync_tmdb(
             else:
                 updated_existing_count += 1
 
-            movie = await service.sync_from_tmdb(item["tmdb_id"])
-            movie.status = MovieStatus.NOW_SHOWING
-            now_synced += 1
+            movie = await service.sync_from_tmdb(tmdb_id, prefetched_data.get(tmdb_id))
+            if movie.id in showtime_movie_ids:
+                movie.status = MovieStatus.NOW_SHOWING
+            elif movie.release_date and movie.release_date > today:
+                movie.status = MovieStatus.COMING_SOON
+            else:
+                movie.status = MovieStatus.NOW_SHOWING
         except Exception as e:
-            logger.warning("Failed to sync now_playing movie", tmdb_id=item["tmdb_id"], error=str(e))
-            failed_items.append({"tmdb_id": item["tmdb_id"], "title": item.get("title"), "reason": str(e)})
+            logger.warning("Failed to sync now_playing movie", tmdb_id=tmdb_id, error=str(e))
+            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": str(e)})
 
     # 2. Sync Upcoming Movies
-    upcoming_synced = 0
-    for item in upcoming_list:
-        if upcoming_synced >= limit:
-            break
-        try:
-            rel_date_str = item.get("release_date")
-            rel_d = date.fromisoformat(rel_date_str) if rel_date_str else None
+    for item in target_upcoming:
+        tmdb_id = item["tmdb_id"]
+        if tmdb_id in fetch_errors and tmdb_id not in prefetched_data:
+            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": fetch_errors[tmdb_id]})
+            continue
 
+        try:
             existing_res = await service.db.execute(
-                select(Movie).where(Movie.tmdb_id == item["tmdb_id"])
+                select(Movie).where(Movie.tmdb_id == tmdb_id)
             )
             ex_movie = existing_res.scalar_one_or_none()
-
-            if ex_movie and ex_movie.id in showtime_movie_ids:
-                ex_movie.status = MovieStatus.NOW_SHOWING
-                continue
-
-            if rel_d and rel_d <= today:
-                if ex_movie:
-                    ex_movie.status = MovieStatus.NOW_SHOWING
-                continue
 
             if not ex_movie:
                 added_new_count += 1
             else:
                 updated_existing_count += 1
 
-            movie = await service.sync_from_tmdb(item["tmdb_id"])
-            movie.status = MovieStatus.COMING_SOON
-            upcoming_synced += 1
+            movie = await service.sync_from_tmdb(tmdb_id, prefetched_data.get(tmdb_id))
+
+            # Upcoming movies fetched from TMDB /upcoming endpoint are COMING_SOON
+            # unless the cinema has active showtimes scheduled for them
+            if movie.id in showtime_movie_ids:
+                movie.status = MovieStatus.NOW_SHOWING
+            elif movie.release_date and movie.release_date > today:
+                movie.status = MovieStatus.COMING_SOON
+            else:
+                movie.status = MovieStatus.NOW_SHOWING
         except Exception as e:
-            logger.warning("Failed to sync upcoming movie", tmdb_id=item["tmdb_id"], error=str(e))
-            failed_items.append({"tmdb_id": item["tmdb_id"], "title": item.get("title"), "reason": str(e)})
+            logger.warning("Failed to sync upcoming movie", tmdb_id=tmdb_id, error=str(e))
+            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": str(e)})
+
+    # Run general showtime-based status updates
+    await service.auto_update_movie_statuses()
 
     await service.db.commit()
 

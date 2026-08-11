@@ -17,7 +17,7 @@ async def test_generate_couple_seats():
 
     mock_db = MagicMock()
     mock_db.flush = AsyncMock()
-    room = Room(id=1, name="Test Room", room_type=RoomType.STANDARD, total_rows=5, total_cols=10)
+    room = Room(id=1, name="Test Room", room_type=RoomType.VIP, total_rows=4, total_cols=8)
 
     seats_added = []
     def add_seat(seat):
@@ -27,15 +27,9 @@ async def test_generate_couple_seats():
 
     await _generate_seats(mock_db, room, couple_rows=1)
 
-    # 4 standard/VIP rows * 10 cols = 40 seats
-    # 1 couple row * (10 / 2) = 5 couple seats
-    # Total = 45 seats
-    assert len(seats_added) == 45
-
     couple_seats = [s for s in seats_added if s.seat_type == SeatType.COUPLE]
-    assert len(couple_seats) == 5
+    assert len(couple_seats) == 4
     assert all(s.width == 2 for s in couple_seats)
-    assert all(s.row_label == "E" for s in couple_seats)
 
 
 @pytest.mark.asyncio

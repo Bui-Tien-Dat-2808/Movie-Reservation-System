@@ -24,26 +24,57 @@ class TMDBService:
     """Service to interact with The Movie Database (TMDB) API with localized region support."""
 
     def __init__(self):
-        self.base_url = settings.TMDB_BASE_URL
-        self.api_key = settings.TMDB_API_KEY
-        self.image_base_url = settings.TMDB_IMAGE_BASE_URL
+        self.base_url = settings.TMDB_BASE_URL.rstrip('/')
+        self.api_key = (settings.TMDB_API_KEY or "").strip()
+        self.image_base_url = settings.TMDB_IMAGE_BASE_URL.rstrip('/')
         self.region = settings.TMDB_REGION
         self.language = settings.TMDB_LANGUAGE
 
-    def _get_client(self) -> httpx.AsyncClient:
+    def _get_auth_headers_and_params(self, extra_params: Optional[Dict[str, Any]] = None) -> tuple[Dict[str, str], Dict[str, Any]]:
+        """
+        Dynamically handles TMDB Authentication:
+        - If api_key is a JWT string starting with 'eyJ' (v4 Read Access Token), pass 'Authorization: Bearer <token>' header.
+        - Otherwise pass 'api_key' query parameter (v3 API key).
+        """
+        headers = dict(DEFAULT_HEADERS)
+        params = dict(extra_params or {})
+
+        if self.api_key:
+            if self.api_key.startswith("eyJ"):
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            else:
+                params["api_key"] = self.api_key
+
+        return headers, params
+
+    def _get_client(self, headers: Dict[str, str]) -> httpx.AsyncClient:
         """Create httpx AsyncClient configured for HTTP/1.1 and custom headers."""
         return httpx.AsyncClient(
-            headers=DEFAULT_HEADERS,
+            headers=headers,
             http2=False,
             timeout=15.0,
         )
 
+    def _build_image_url(self, path: Optional[str]) -> Optional[str]:
+        """Safely construct poster/backdrop full URL without duplicating prefixes or slashes."""
+        if not path:
+            return None
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        clean_path = path.lstrip('/')
+        return f"{self.image_base_url}/{clean_path}"
+
     async def get_movie(self, tmdb_id: int) -> Dict[str, Any]:
-        """Fetch movie data from TMDB API."""
-        async with self._get_client() as client:
+        """Fetch movie data from TMDB API with localized region release date."""
+        headers, params = self._get_auth_headers_and_params({
+            "language": self.language,
+            "append_to_response": "release_dates",
+        })
+
+        async with self._get_client(headers) as client:
             response = await client.get(
                 f"{self.base_url}/movie/{tmdb_id}",
-                params={"api_key": self.api_key, "language": self.language},
+                params=params,
             )
 
         if response.status_code == 404:
@@ -52,21 +83,33 @@ class TMDBService:
         response.raise_for_status()
         data = response.json()
 
-        # Parse release_date
+        # Parse release_date: Try region-specific release date first (e.g. VN)
         release_date = None
-        if data.get("release_date"):
+        region_results = data.get("release_dates", {}).get("results", [])
+        matched_region = next((r for r in region_results if r.get("iso_3166_1") == self.region), None)
+
+        if matched_region and matched_region.get("release_dates"):
+            rd_list = matched_region["release_dates"]
+            # Prefer theatrical release (type 3 or 2), fallback to first available
+            theatrical = next((rd for rd in rd_list if rd.get("type") in (2, 3)), None) or rd_list[0]
+            if theatrical.get("release_date"):
+                try:
+                    release_date = date.fromisoformat(theatrical["release_date"].split("T")[0])
+                except (ValueError, TypeError):
+                    pass
+
+        # Fallback to primary global release_date if region date was not found
+        if not release_date and data.get("release_date"):
             try:
                 release_date = date.fromisoformat(data["release_date"])
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
 
-        # Build poster URL
-        poster_url = None
-        if data.get("poster_path"):
-            poster_url = f"{self.image_base_url}{data['poster_path']}"
+        # Build poster URL safely
+        poster_url = self._build_image_url(data.get("poster_path"))
 
         # Extract genres
-        genre_names = [g["name"] for g in data.get("genres", [])]
+        genre_names = [g["name"] for g in data.get("genres", []) if isinstance(g, dict) and "name" in g]
 
         return {
             "tmdb_id": data["id"],
@@ -82,16 +125,17 @@ class TMDBService:
 
     async def search_movies(self, query: str, page: int = 1) -> Dict[str, Any]:
         """Search TMDB for movies by query."""
-        async with self._get_client() as client:
+        headers, params = self._get_auth_headers_and_params({
+            "query": query,
+            "page": page,
+            "language": self.language,
+            "region": self.region,
+        })
+
+        async with self._get_client(headers) as client:
             response = await client.get(
                 f"{self.base_url}/search/movie",
-                params={
-                    "api_key": self.api_key,
-                    "query": query,
-                    "page": page,
-                    "language": self.language,
-                    "region": self.region,
-                },
+                params=params,
             )
 
         response.raise_for_status()
@@ -99,10 +143,7 @@ class TMDBService:
 
         results = []
         for movie in data.get("results", []):
-            poster_url = None
-            if movie.get("poster_path"):
-                poster_url = f"{self.image_base_url}{movie['poster_path']}"
-
+            poster_url = self._build_image_url(movie.get("poster_path"))
             results.append({
                 "tmdb_id": movie["id"],
                 "title": movie["title"],
@@ -120,15 +161,16 @@ class TMDBService:
 
     async def get_popular_movies(self, page: int = 1) -> Dict[str, Any]:
         """Get popular movies from TMDB."""
-        async with self._get_client() as client:
+        headers, params = self._get_auth_headers_and_params({
+            "page": page,
+            "language": self.language,
+            "region": self.region,
+        })
+
+        async with self._get_client(headers) as client:
             response = await client.get(
                 f"{self.base_url}/movie/popular",
-                params={
-                    "api_key": self.api_key,
-                    "page": page,
-                    "language": self.language,
-                    "region": self.region,
-                },
+                params=params,
             )
 
         response.raise_for_status()
@@ -136,9 +178,7 @@ class TMDBService:
 
         results = []
         for movie in data.get("results", []):
-            poster_url = None
-            if movie.get("poster_path"):
-                poster_url = f"{self.image_base_url}{movie['poster_path']}"
+            poster_url = self._build_image_url(movie.get("poster_path"))
             results.append({
                 "tmdb_id": movie["id"],
                 "title": movie["title"],
@@ -155,15 +195,16 @@ class TMDBService:
 
     async def get_now_playing_movies(self, page: int = 1) -> Dict[str, Any]:
         """Get currently playing movies in theaters from TMDB for configured region."""
-        async with self._get_client() as client:
+        headers, params = self._get_auth_headers_and_params({
+            "page": page,
+            "language": self.language,
+            "region": self.region,
+        })
+
+        async with self._get_client(headers) as client:
             response = await client.get(
                 f"{self.base_url}/movie/now_playing",
-                params={
-                    "api_key": self.api_key,
-                    "page": page,
-                    "language": self.language,
-                    "region": self.region,
-                },
+                params=params,
             )
 
         response.raise_for_status()
@@ -171,9 +212,7 @@ class TMDBService:
 
         results = []
         for movie in data.get("results", []):
-            poster_url = None
-            if movie.get("poster_path"):
-                poster_url = f"{self.image_base_url}{movie['poster_path']}"
+            poster_url = self._build_image_url(movie.get("poster_path"))
             results.append({
                 "tmdb_id": movie["id"],
                 "title": movie["title"],
@@ -191,15 +230,16 @@ class TMDBService:
 
     async def get_upcoming_movies(self, page: int = 1) -> Dict[str, Any]:
         """Get upcoming movies from TMDB for configured region."""
-        async with self._get_client() as client:
+        headers, params = self._get_auth_headers_and_params({
+            "page": page,
+            "language": self.language,
+            "region": self.region,
+        })
+
+        async with self._get_client(headers) as client:
             response = await client.get(
                 f"{self.base_url}/movie/upcoming",
-                params={
-                    "api_key": self.api_key,
-                    "page": page,
-                    "language": self.language,
-                    "region": self.region,
-                },
+                params=params,
             )
 
         response.raise_for_status()
@@ -207,9 +247,7 @@ class TMDBService:
 
         results = []
         for movie in data.get("results", []):
-            poster_url = None
-            if movie.get("poster_path"):
-                poster_url = f"{self.image_base_url}{movie['poster_path']}"
+            poster_url = self._build_image_url(movie.get("poster_path"))
             results.append({
                 "tmdb_id": movie["id"],
                 "title": movie["title"],

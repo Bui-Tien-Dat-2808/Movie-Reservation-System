@@ -64,13 +64,10 @@ class TestMovieAutoStatusTransition:
         fut_result = MagicMock()
         fut_result.scalars().all.return_value = []
 
-        cs_result = MagicMock()
-        cs_result.scalars().all.return_value = [past_movie]
+        movie_result = MagicMock()
+        movie_result.scalars().all.return_value = [past_movie]
 
-        ns_result = MagicMock()
-        ns_result.scalars().all.return_value = []
-
-        db_mock.execute.side_effect = [fut_result, cs_result, ns_result]
+        db_mock.execute.side_effect = [fut_result, movie_result]
 
         await service.auto_update_movie_statuses()
 
@@ -78,7 +75,7 @@ class TestMovieAutoStatusTransition:
 
     @pytest.mark.asyncio
     async def test_now_showing_to_ended_when_all_showtimes_past(self):
-        """Test movie in NOW_SHOWING with only past showtimes converts to ENDED if released > 60 days ago."""
+        """Test movie in NOW_SHOWING with only past showtimes converts to ENDED if released > 120 days ago."""
         from app.services.movie_service import MovieService
 
         db_mock = AsyncMock()
@@ -89,20 +86,17 @@ class TestMovieAutoStatusTransition:
             id=2,
             title="Finished Movie",
             status=MovieStatus.NOW_SHOWING,
-            release_date=date.today() - timedelta(days=90),
+            release_date=date.today() - timedelta(days=40),
             is_active=True
         )
 
         fut_result = MagicMock()
         fut_result.scalars().all.return_value = []  # No future showtimes
 
-        cs_result = MagicMock()
-        cs_result.scalars().all.return_value = []
+        movie_result = MagicMock()
+        movie_result.scalars().all.return_value = [showing_movie]
 
-        ns_result = MagicMock()
-        ns_result.scalars().all.return_value = [showing_movie]
-
-        db_mock.execute.side_effect = [fut_result, cs_result, ns_result]
+        db_mock.execute.side_effect = [fut_result, movie_result]
 
         await service.auto_update_movie_statuses()
 
@@ -128,13 +122,10 @@ class TestMovieAutoStatusTransition:
         fut_result = MagicMock()
         fut_result.scalars().all.return_value = []
 
-        cs_result = MagicMock()
-        cs_result.scalars().all.return_value = []
+        movie_result = MagicMock()
+        movie_result.scalars().all.return_value = [old_movie]
 
-        ns_result = MagicMock()
-        ns_result.scalars().all.return_value = [old_movie]
-
-        db_mock.execute.side_effect = [fut_result, cs_result, ns_result]
+        db_mock.execute.side_effect = [fut_result, movie_result]
 
         await service.auto_update_movie_statuses()
 
