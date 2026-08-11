@@ -16,6 +16,7 @@ from app.schemas.showtime import (
     AutoScheduleRequest,
     ProposedShowtimeItem,
     AutoScheduleConfirmRequest,
+    BulkCancelShowtimesRequest,
 )
 from app.services.cache_service import CacheService
 from app.services.showtime_service import ShowtimeService
@@ -161,19 +162,42 @@ async def confirm_auto_schedule(
     return {"message": f"Successfully created {count} showtimes", "count": count}
 
 
+@router.post(
+    "/admin/bulk-cancel",
+    summary="Bulk cancel showtimes via payload (Admin)",
+)
 @router.delete(
     "/admin/bulk-cancel",
-    summary="Bulk cancel showtimes (Admin)",
+    summary="Bulk cancel showtimes via query params (Admin)",
 )
 async def bulk_cancel_showtimes(
+    payload: Optional[BulkCancelShowtimesRequest] = None,
     movie_id: Optional[int] = Query(None, description="Filter by movie ID"),
     room_id: Optional[int] = Query(None, description="Filter by room ID"),
+    only_upcoming: bool = Query(True, description="Only cancel upcoming showtimes"),
+    showtime_ids: Optional[str] = Query(None, description="Comma-separated list of showtime IDs"),
     service: ShowtimeService = Depends(get_showtime_service),
     _=Depends(require_admin),
 ):
-    """Admin: Bulk cancel all showtimes (or showtimes matching movie/room filter)."""
-    count = await service.bulk_cancel_showtimes(movie_id, room_id)
-    return {"message": f"Successfully cancelled {count} showtimes", "count": count}
+    """Admin: Bulk cancel showtimes matching filters or specific IDs."""
+    if payload:
+        s_ids = payload.showtime_ids
+        m_id = payload.movie_id
+        r_id = payload.room_id
+        upcoming = payload.only_upcoming
+    else:
+        s_ids = [int(i.strip()) for i in showtime_ids.split(",") if i.strip()] if showtime_ids else None
+        m_id = movie_id
+        r_id = room_id
+        upcoming = only_upcoming
+
+    count = await service.bulk_cancel_showtimes(
+        movie_id=m_id,
+        room_id=r_id,
+        only_upcoming=upcoming,
+        showtime_ids=s_ids,
+    )
+    return {"message": f"Đã hủy thành công {count} suất chiếu!", "count": count}
 
 
 @router.post(

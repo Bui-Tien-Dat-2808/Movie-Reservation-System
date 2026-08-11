@@ -282,13 +282,24 @@ class ShowtimeService:
         self,
         movie_id: Optional[int] = None,
         room_id: Optional[int] = None,
+        only_upcoming: bool = True,
+        showtime_ids: Optional[List[int]] = None,
     ) -> int:
-        """Bulk cancel showtimes matching optional movie/room filters."""
+        """Bulk cancel showtimes matching optional filters, preserving past/running showtimes by default."""
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+
         query = select(Showtime).where(Showtime.status != ShowtimeStatus.CANCELLED)
+
+        if showtime_ids:
+            query = query.where(Showtime.id.in_(showtime_ids))
         if movie_id:
             query = query.where(Showtime.movie_id == movie_id)
         if room_id:
             query = query.where(Showtime.room_id == room_id)
+        if only_upcoming:
+            # Preserve past and currently playing showtimes
+            query = query.where(Showtime.start_time >= now_utc)
 
         res = await self.db.execute(query)
         showtimes = res.scalars().all()
@@ -299,7 +310,7 @@ class ShowtimeService:
 
         await self.db.commit()
         await self.cache.delete_pattern("showtimes:*")
-        logger.info("Bulk showtimes cancelled", count=count, movie_id=movie_id, room_id=room_id)
+        logger.info("Bulk showtimes cancelled", count=count, movie_id=movie_id, room_id=room_id, only_upcoming=only_upcoming)
         return count
 
     async def get_seat_map(self, showtime_id: int) -> dict:
@@ -471,16 +482,21 @@ class ShowtimeService:
                                 matched_pairs.append((movie, list(common)[0]))
 
                     if matched_pairs:
-                        effective_movies = [p[0] for p in matched_pairs]
+                        matched_movies = [p[0] for p in matched_pairs]
+                        other_movies = [m for m in day_movies if m not in matched_movies]
+                        effective_movies = matched_movies + other_movies
                         genre_lookup = {p[0].id: p[1] for p in matched_pairs}
                     else:
                         effective_movies = day_movies
                         genre_lookup = {}
 
-                # Track movie rotation index independently by Room Type for consistent distribution across multiple rooms
-                # TODO: Consider weighted popularity distribution (TMDB popularity score) for prime time slot allocation
-                idx_key = room.room_type
-                movie_idx = movie_idx_by_type.get(idx_key, 0)
+                # Dynamic Rotation: Offset movie rotation by room index and day offset
+                # to guarantee smooth time slot rotation and broad room type coverage across days
+                room_idx = rooms.index(room)
+                day_offset = (curr_d - start_d).days
+                idx_key = f"{room.room_type}_{room.id}"
+                base_start_idx = day_offset * 5 + room_idx * 3
+                movie_idx = movie_idx_by_type.get(idx_key, base_start_idx)
 
                 start_dt_bound = datetime.combine(curr_d, time_cls(0, 0), tzinfo=cinema_tz).astimezone(timezone.utc)
                 end_dt_bound = datetime.combine(curr_d, time_cls(23, 59, 59), tzinfo=cinema_tz).astimezone(timezone.utc)

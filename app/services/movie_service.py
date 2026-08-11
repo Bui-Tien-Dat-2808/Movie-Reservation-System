@@ -68,7 +68,9 @@ class MovieService:
                 m.status = MovieStatus.COMING_SOON
             elif m.release_date and m.release_date < cutoff_date and not has_future_st:
                 m.status = MovieStatus.ENDED
-            else:
+            elif m.release_date:
+                m.status = MovieStatus.NOW_SHOWING
+            elif has_future_st:
                 m.status = MovieStatus.NOW_SHOWING
 
             if m.status != old_status:
