@@ -46,8 +46,9 @@ class Settings(BaseSettings):
     TMDB_REGION: str = "VN"
     TMDB_LANGUAGE: str = "vi-VN"
 
-    # CORS
+    # CORS & Frontend Base URL
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
+    FRONTEND_BASE_URL: str = "http://localhost:5173"
 
     # Cache TTLs (seconds)
     CACHE_TTL_MOVIES: int = 300        # 5 minutes

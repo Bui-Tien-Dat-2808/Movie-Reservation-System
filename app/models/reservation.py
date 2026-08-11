@@ -30,7 +30,7 @@ class Reservation(Base):
     voucher_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     status: Mapped[ReservationStatus] = mapped_column(
-        Enum(ReservationStatus), default=ReservationStatus.CONFIRMED, nullable=False
+        Enum(ReservationStatus), default=ReservationStatus.PENDING, nullable=False
     )
     is_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     checked_in_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -51,6 +51,12 @@ class Reservation(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    payment_transactions: Mapped[List["PaymentTransaction"]] = relationship(  # noqa: F821
+        "PaymentTransaction",
+        back_populates="reservation",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
     def __repr__(self) -> str:
         return f"<Reservation id={self.id} user={self.user_id} status={self.status}>"
@@ -64,7 +70,7 @@ class ReservationSeat(Base):
         Integer, ForeignKey("reservations.id", ondelete="CASCADE"), nullable=False
     )
     showtime_seat_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("showtime_seats.id", ondelete="CASCADE"), nullable=False, unique=True
+        Integer, ForeignKey("showtime_seats.id", ondelete="CASCADE"), nullable=False
     )
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
 
@@ -73,7 +79,7 @@ class ReservationSeat(Base):
         "Reservation", back_populates="reservation_seats"
     )
     showtime_seat: Mapped["ShowtimeSeat"] = relationship(  # noqa: F821
-        "ShowtimeSeat", back_populates="reservation_seat"
+        "ShowtimeSeat", back_populates="reservation_seats"
     )
 
     def __repr__(self) -> str:

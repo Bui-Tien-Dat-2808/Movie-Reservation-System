@@ -15,6 +15,27 @@ from app.db.init_db import init_db
 logger = structlog.get_logger()
 
 
+import asyncio
+
+async def periodic_reservation_cleanup():
+    """Background task running every 60s to cancel expired pending reservations."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            from app.db.session import AsyncSessionLocal
+            from app.services.reservation_service import ReservationService
+            from app.services.cache_service import CacheService
+            async with AsyncSessionLocal() as db:
+                service = ReservationService(db, CacheService(None))
+                cancelled_count = await service.cleanup_expired_pending_reservations()
+                if cancelled_count > 0:
+                    logger.info("expired_reservations_cleaned_up", count=cancelled_count)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("periodic_reservation_cleanup_error", error=str(e))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -24,9 +45,13 @@ async def lifespan(app: FastAPI):
     # Initialize database (create tables + seed admin)
     await init_db()
 
+    # Start periodic background cleanup task
+    cleanup_task = asyncio.create_task(periodic_reservation_cleanup())
+
     yield
 
-    # Cleanup on shutdown
+    # Cancel background task & cleanup on shutdown
+    cleanup_task.cancel()
     await engine.dispose()
     logger.info("Application shutdown complete")
 

@@ -41,8 +41,8 @@ class ShowtimeSeat(Base):
     showtime: Mapped["Showtime"] = relationship("Showtime", back_populates="showtime_seats")  # noqa: F821
     seat: Mapped["Seat"] = relationship("Seat", back_populates="showtime_seats")  # noqa: F821
     held_by_user: Mapped[Optional["User"]] = relationship("User")  # noqa: F821
-    reservation_seat: Mapped["ReservationSeat"] = relationship(  # noqa: F821
-        "ReservationSeat", back_populates="showtime_seat", uselist=False
+    reservation_seats: Mapped[list["ReservationSeat"]] = relationship(  # noqa: F821
+        "ReservationSeat", back_populates="showtime_seat"
     )
 
     def __repr__(self) -> str:

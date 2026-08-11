@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import List, Optional
 
@@ -69,14 +69,18 @@ class ReservationService:
         now = datetime.now(timezone.utc)
         
         for ss in locked_seats:
-            is_valid_hold = (
-                ss.status == SeatStatus.HELD
-                and ss.held_by == user_id
-                and ss.held_until is not None
-                and ensure_utc(ss.held_until) >= now
-            )
-            if not is_valid_hold:
+            if ss.status == SeatStatus.BOOKED:
                 raise SeatUnavailableException([ss.seat_id])
+            elif ss.status == SeatStatus.HELD:
+                held_until_aware = (
+                    ss.held_until.replace(tzinfo=timezone.utc)
+                    if ss.held_until and ss.held_until.tzinfo is None
+                    else (ss.held_until.astimezone(timezone.utc) if ss.held_until else None)
+                )
+                hold_still_active = held_until_aware and held_until_aware > now
+                held_by_someone_else = ss.held_by != user_id
+                if hold_still_active and held_by_someone_else:
+                    raise SeatUnavailableException([ss.seat_id])
 
         # Calculate total price (subtotal)
         subtotal = Decimal("0")
@@ -114,6 +118,19 @@ class ReservationService:
             discount_amount = Decimal(str(round(disc_val, 2)))
             final_total = Decimal(str(round(final_val, 2)))
 
+        # Cancel any previous PENDING reservations for this user on this showtime to avoid duplicate pending orders
+        existing_pending = await self.db.execute(
+            select(Reservation).where(
+                Reservation.user_id == user_id,
+                Reservation.showtime_id == data.showtime_id,
+                Reservation.status == ReservationStatus.PENDING,
+            )
+        )
+        for old_res in existing_pending.scalars().all():
+            old_res.status = ReservationStatus.CANCELLED
+            old_res.notes = "Đã hủy: Thay thế bởi đơn thanh toán mới"
+            self.db.add(old_res)
+
         # Create reservation
         reservation = Reservation(
             user_id=user_id,
@@ -121,7 +138,7 @@ class ReservationService:
             total_price=final_total,
             voucher_code=voucher_code,
             discount_amount=discount_amount,
-            status=ReservationStatus.CONFIRMED,
+            status=ReservationStatus.PENDING,
         )
         self.db.add(reservation)
         await self.db.flush()
@@ -134,11 +151,12 @@ class ReservationService:
                 reservation_id=reservation.id,
             )
 
-        # Create reservation seats and update showtime_seat status
+        # Create reservation seats and keep showtime_seat HELD for 15 mins during payment
+        pay_held_until = now + timedelta(minutes=15)
         for ss in locked_seats:
-            ss.status = SeatStatus.BOOKED
-            ss.held_by = None
-            ss.held_until = None
+            ss.status = SeatStatus.HELD
+            ss.held_by = user_id
+            ss.held_until = pay_held_until
             rs = ReservationSeat(
                 reservation_id=reservation.id,
                 showtime_seat_id=ss.id,
@@ -498,3 +516,162 @@ class ReservationService:
             "message": "✅ Check-in vé thành công! Khán giả đã vào rạp.",
             "reservation": ReservationResponse.model_validate(reservation),
         }
+
+    async def confirm_payment_success(
+        self, reservation_id: int, vnp_params: dict
+    ) -> Reservation:
+        """
+        Transition reservation from PENDING -> CONFIRMED, mark seats as BOOKED,
+        and log PaymentTransaction.
+        """
+        reservation = await self.get_reservation(reservation_id)
+        if not reservation:
+            raise NotFoundException(f"Reservation {reservation_id} not found")
+
+        if reservation.status == ReservationStatus.CONFIRMED:
+            return reservation  # Already confirmed (e.g., IPN vs Return callback race)
+
+        # 1. Update Reservation status
+        reservation.status = ReservationStatus.CONFIRMED
+        self.db.add(reservation)
+
+        # 2. Lock & update ShowtimeSeats from HELD -> BOOKED
+        rs_result = await self.db.execute(
+            select(ReservationSeat).where(ReservationSeat.reservation_id == reservation.id)
+        )
+        r_seats = rs_result.scalars().all()
+        seat_ids = [rs.showtime_seat_id for rs in r_seats]
+
+        if seat_ids:
+            st_seats_result = await self.db.execute(
+                select(ShowtimeSeat).where(ShowtimeSeat.id.in_(seat_ids))
+            )
+            for ss in st_seats_result.scalars().all():
+                ss.status = SeatStatus.BOOKED
+                ss.held_by = None
+                ss.held_until = None
+                self.db.add(ss)
+
+        # 3. Add or update PaymentTransaction
+        from app.models.payment import PaymentTransaction
+        vnp_txn_ref = vnp_params.get("vnp_TxnRef", f"RES_{reservation.id}")
+        
+        existing_tx_result = await self.db.execute(
+            select(PaymentTransaction).where(PaymentTransaction.vnp_txn_ref == vnp_txn_ref)
+        )
+        existing_tx = existing_tx_result.scalar_one_or_none()
+
+        if existing_tx:
+            existing_tx.status = "success"
+            existing_tx.transaction_no = vnp_params.get("vnp_TransactionNo")
+            existing_tx.bank_code = vnp_params.get("vnp_BankCode")
+            existing_tx.card_type = vnp_params.get("vnp_CardType")
+            existing_tx.response_code = vnp_params.get("vnp_ResponseCode", "00")
+            existing_tx.pay_date = datetime.now(timezone.utc)
+            self.db.add(existing_tx)
+        else:
+            tx = PaymentTransaction(
+                reservation_id=reservation.id,
+                amount=reservation.total_price,
+                payment_method="vnpay",
+                vnp_txn_ref=vnp_txn_ref,
+                transaction_no=vnp_params.get("vnp_TransactionNo"),
+                bank_code=vnp_params.get("vnp_BankCode"),
+                card_type=vnp_params.get("vnp_CardType"),
+                response_code=vnp_params.get("vnp_ResponseCode", "00"),
+                status="success",
+                pay_date=datetime.now(timezone.utc),
+            )
+            self.db.add(tx)
+
+        # 4. Award loyalty points to user
+        from app.services.loyalty_service import LoyaltyService
+        await LoyaltyService.award_points(self.db, reservation)
+
+        await self.db.commit()
+        await self.db.refresh(reservation)
+        return reservation
+
+    async def cancel_pending_reservation(
+        self, reservation_id: int, vnp_params: dict = None, reason: str = "Thanh toán thất bại hoặc quá hạn"
+    ) -> Reservation:
+        """
+        Transition reservation from PENDING -> CANCELLED, release seats to AVAILABLE,
+        and log failed PaymentTransaction.
+        """
+        reservation = await self.get_reservation(reservation_id)
+        if not reservation:
+            raise NotFoundException(f"Reservation {reservation_id} not found")
+
+        if reservation.status == ReservationStatus.CONFIRMED:
+            return reservation  # Cannot cancel an already confirmed payment
+
+        reservation.status = ReservationStatus.CANCELLED
+        reservation.notes = f"Đã hủy: {reason}"
+        self.db.add(reservation)
+
+        # Release seats
+        rs_result = await self.db.execute(
+            select(ReservationSeat).where(ReservationSeat.reservation_id == reservation.id)
+        )
+        r_seats = rs_result.scalars().all()
+        seat_ids = [rs.showtime_seat_id for rs in r_seats]
+
+        if seat_ids:
+            st_seats_result = await self.db.execute(
+                select(ShowtimeSeat).where(ShowtimeSeat.id.in_(seat_ids))
+            )
+            for ss in st_seats_result.scalars().all():
+                if ss.status != SeatStatus.BOOKED:
+                    ss.status = SeatStatus.AVAILABLE
+                    ss.held_by = None
+                    ss.held_until = None
+                    self.db.add(ss)
+
+        # Record failed transaction if vnp_params provided
+        if vnp_params:
+            from app.models.payment import PaymentTransaction
+            vnp_txn_ref = vnp_params.get("vnp_TxnRef", f"RES_{reservation.id}")
+            tx = PaymentTransaction(
+                reservation_id=reservation.id,
+                amount=reservation.total_price,
+                payment_method="vnpay",
+                vnp_txn_ref=vnp_txn_ref,
+                transaction_no=vnp_params.get("vnp_TransactionNo"),
+                bank_code=vnp_params.get("vnp_BankCode"),
+                card_type=vnp_params.get("vnp_CardType"),
+                response_code=vnp_params.get("vnp_ResponseCode", "99"),
+                status="failed",
+                pay_date=datetime.now(timezone.utc),
+            )
+            self.db.add(tx)
+
+        await self.db.commit()
+        await self.db.refresh(reservation)
+        return reservation
+
+    async def cleanup_expired_pending_reservations(self) -> int:
+        """
+        Cancel all PENDING reservations that have passed their 15-minute hold window.
+        Returns the number of cancelled reservations.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff_time = now - timedelta(minutes=15)
+
+        result = await self.db.execute(
+            select(Reservation).where(
+                Reservation.status == ReservationStatus.PENDING,
+                Reservation.created_at <= cutoff_time,
+            )
+        )
+        expired_reservations = result.scalars().all()
+        count = 0
+
+        for res in expired_reservations:
+            try:
+                await self.cancel_pending_reservation(res.id, reason="Quá hạn thanh toán 15 phút")
+                count += 1
+            except Exception as e:
+                logger.error("cleanup_pending_reservation_failed", reservation_id=res.id, error=str(e))
+
+        return count
