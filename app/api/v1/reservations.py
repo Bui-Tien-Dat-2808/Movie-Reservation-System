@@ -105,6 +105,22 @@ async def cancel_reservation(
 
 
 @router.post(
+    "/{reservation_id}/cancel",
+    status_code=status.HTTP_200_OK,
+    response_model=ReservationResponse,
+    summary="Cancel reservation (POST alias)",
+)
+async def cancel_reservation_post(
+    reservation_id: int,
+    current_user: User = Depends(get_current_active_user),
+    service: ReservationService = Depends(get_reservation_service),
+):
+    """Cancel a reservation (POST alias)."""
+    reservation = await service.cancel_reservation(reservation_id, current_user.id)
+    return _build_reservation_response(reservation)
+
+
+@router.post(
     "/{reservation_id}/exchange",
     response_model=ReservationResponse,
     summary="Exchange reservation to another showtime/seats",

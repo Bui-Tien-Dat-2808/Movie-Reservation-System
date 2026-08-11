@@ -72,12 +72,11 @@ async def _generate_seats(db: AsyncSession, room: Room, couple_rows: int = 1) ->
             for col in range(1, total_cols + 1):
                 db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=s_type, width=1, is_active=True))
 
-        # 5. KIDS ROOM: Rows A-F = KIDS seats, Rows G-H = Couple/Family pairs
+        # 5. KIDS ROOM: Rows A-F = KIDS seats, Rows G-H = Standard seats for parents (0 Couple seats)
         elif r_type == RoomType.KIDS:
-            if row_idx >= 6:  # Rows G, H (back rows)
-                num_couples = max(1, total_cols // 2)
-                for c_idx in range(1, num_couples + 1):
-                    db.add(Seat(room_id=room.id, row_label=row_label, col_number=c_idx, seat_type=SeatType.COUPLE, width=2, is_active=True))
+            if row_idx >= 6:  # Rows G, H (back rows for parents/accompanying adults)
+                for col in range(1, total_cols + 1):
+                    db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=SeatType.STANDARD, width=1, is_active=True))
             else:  # Rows A-F
                 for col in range(1, total_cols + 1):
                     db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=SeatType.KIDS, width=1, is_active=True))

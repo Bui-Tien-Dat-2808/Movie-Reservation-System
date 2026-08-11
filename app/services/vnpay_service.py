@@ -10,16 +10,14 @@ from typing import Dict, Any
 VN_TZ = timezone(timedelta(hours=7))
 
 
+from app.config import settings
+
 class VNPayService:
     def __init__(self):
-        self.vnp_tmn_code = os.getenv("VNPAY_TMN_CODE", "2QX7C60F")
-        self.vnp_hash_secret = os.getenv("VNPAY_HASH_SECRET", "AWAATBAEAHWKYWTYVWWPBNHYVTWYQJJA")
-        self.vnp_payment_url = os.getenv(
-            "VNPAY_URL", "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
-        )
-        self.vnp_return_url = os.getenv(
-            "VNPAY_RETURN_URL", "http://localhost:8443/api/v1/payments/vnpay-return"
-        )
+        self.vnp_tmn_code = settings.VNPAY_TMN_CODE
+        self.vnp_hash_secret = settings.VNPAY_HASH_SECRET
+        self.vnp_payment_url = settings.VNPAY_URL
+        self.vnp_return_url = settings.VNPAY_RETURN_URL or f"{settings.FRONTEND_BASE_URL}/api/v1/payments/vnpay-return"
 
     def create_payment_url(
         self,

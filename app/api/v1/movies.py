@@ -181,6 +181,9 @@ async def auto_sync_tmdb(
     from app.core.exceptions import ConflictException
 
     tmdb = TMDBService()
+    if not tmdb.api_key or not tmdb.api_key.strip():
+        raise ConflictException("TMDB_API_KEY chưa được cấu hình. Vui lòng thêm TMDB_API_KEY vào file .env.")
+
     pages_needed = max(1, math.ceil(limit / 20))
 
     now_playing_list = []

@@ -13,7 +13,8 @@ from app.models.user import User
 from app.models.reservation import ReservationStatus
 from app.services.cache_service import CacheService
 from app.services.reservation_service import ReservationService
-from app.services.vnpay_service import VNPayService
+from datetime import datetime
+from app.services.vnpay_service import VNPayService, VN_TZ
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 logger = structlog.get_logger()
@@ -76,16 +77,23 @@ async def create_payment_url(
     if "x-forwarded-for" in request.headers:
         client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
 
-    vnp_txn_ref = f"CVN_{reservation.id}_{int(reservation.created_at.timestamp() if reservation.created_at else 0)}"
-    order_info = f"Thanh toan ve ve CineVerse #{reservation.ticket_code or reservation.id}"
+    vnp_txn_ref = f"CVN_{reservation.id}_{int(datetime.now(VN_TZ).timestamp())}"
+    order_info = f"Thanh toan ve CineVerse {reservation.ticket_code or reservation.id}"
 
-    payment_url = vnpay_service.create_payment_url(
-        vnp_txn_ref=vnp_txn_ref,
-        amount=reservation.total_price,
-        order_info=order_info,
-        client_ip=client_ip,
-        return_url=f"{settings.FRONTEND_BASE_URL}/api/v1/payments/vnpay-return",
-    )
+    try:
+        payment_url = vnpay_service.create_payment_url(
+            vnp_txn_ref=vnp_txn_ref,
+            amount=reservation.total_price,
+            order_info=order_info,
+            client_ip=client_ip,
+            return_url=f"{settings.FRONTEND_BASE_URL}/api/v1/payments/vnpay-return",
+        )
+    except Exception as e:
+        logger.exception("Lỗi khi tạo VNPay payment URL cho reservation_id=%s", reservation.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Không thể tạo link thanh toán VNPay: {str(e)}",
+        )
 
     logger.info("vnpay_payment_url_created", reservation_id=reservation.id, vnp_txn_ref=vnp_txn_ref)
 
@@ -129,9 +137,6 @@ async def vnpay_return(
 
     if not is_valid:
         logger.error("vnpay_return_invalid_checksum", vnp_txn_ref=vnp_txn_ref)
-        await service.cancel_pending_reservation(
-            reservation_id, query_params, reason="Chữ ký checksum VNPay không hợp lệ"
-        )
         return RedirectResponse(
             url=f"{frontend_base}/payment-result?status=failed&reservation_id={reservation_id}&code=INVALID_CHECKSUM"
         )

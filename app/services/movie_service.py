@@ -385,9 +385,13 @@ class MovieService:
         if genre_ids:
             await self._set_genres(movie.id, genre_ids)
 
-        await self.db.flush()
-        await self.db.refresh(movie)
-        await self.cache.delete_pattern(f"{CACHE_KEY_MOVIES}*")
+        if self.cache:
+            try:
+                res = self.cache.delete_pattern(f"{CACHE_KEY_MOVIES}*")
+                if hasattr(res, "__await__"):
+                    await res
+            except Exception:
+                pass
         logger.info("Movie synced from TMDB", tmdb_id=tmdb_id, movie_id=movie.id)
         
         # Eager load relationships to avoid Pydantic lazy load errors during serialization

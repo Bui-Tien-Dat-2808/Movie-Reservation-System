@@ -277,6 +277,8 @@ class ReservationService:
             ss = ss_result.scalar_one_or_none()
             if ss:
                 ss.status = SeatStatus.AVAILABLE
+                ss.held_by = None
+                ss.held_until = None
 
         reservation.status = ReservationStatus.CANCELLED
         await self.db.flush()

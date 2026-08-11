@@ -46,9 +46,16 @@ class Settings(BaseSettings):
     TMDB_REGION: str = "VN"
     TMDB_LANGUAGE: str = "vi-VN"
 
-    # CORS & Frontend Base URL
+    # CORS & Base URLs
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
     FRONTEND_BASE_URL: str = "http://localhost:5173"
+    BACKEND_BASE_URL: str = "http://localhost:8000"
+
+    # VNPay Configuration
+    VNPAY_TMN_CODE: str = "S6967RVA"
+    VNPAY_HASH_SECRET: str = "NTDXCYCSAOPNANKALKQZICSVHTRLIKUX"
+    VNPAY_URL: str = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
+    VNPAY_RETURN_URL: str = ""
 
     # Cache TTLs (seconds)
     CACHE_TTL_MOVIES: int = 300        # 5 minutes
