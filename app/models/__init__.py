@@ -8,6 +8,7 @@ from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
 from app.models.reservation import Reservation, ReservationSeat, ReservationStatus
 from app.models.payment import PaymentTransaction
+from app.models.refund import RefundTransaction
 from app.models.voucher import Voucher, VoucherDiscountType, VoucherRedemption
 from app.models.loyalty import PointTransaction
 from app.models.concession import Concession, ConcessionCategory, ReservationConcession
@@ -22,6 +23,7 @@ __all__ = [
     "ShowtimeSeat", "SeatStatus",
     "Reservation", "ReservationSeat", "ReservationStatus",
     "PaymentTransaction",
+    "RefundTransaction",
     "Voucher", "VoucherDiscountType", "VoucherRedemption",
     "PointTransaction",
     "Concession", "ConcessionCategory", "ReservationConcession",

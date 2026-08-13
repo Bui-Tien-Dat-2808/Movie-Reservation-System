@@ -16,6 +16,7 @@ class MovieBase(BaseModel):
     language: Optional[str] = Field(None, max_length=100)
     rating: Optional[str] = Field(None, max_length=10)
     director: Optional[str] = Field(None, max_length=255)
+    popularity: Optional[float] = None
     status: MovieStatus = MovieStatus.NOW_SHOWING
 
 
@@ -33,6 +34,7 @@ class MovieUpdate(BaseModel):
     language: Optional[str] = None
     rating: Optional[str] = None
     director: Optional[str] = None
+    popularity: Optional[float] = None
     status: Optional[MovieStatus] = None
     genre_ids: Optional[List[int]] = None
 
@@ -57,6 +59,7 @@ class MovieListResponse(BaseModel):
     release_date: Optional[date]
     rating: Optional[str]
     director: Optional[str]
+    popularity: Optional[float] = None
     status: MovieStatus
     genres: List[GenreResponse] = []
     created_at: datetime

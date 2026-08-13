@@ -6,6 +6,7 @@ class LoginRequest(BaseModel):
     account: Optional[str] = None  # Email or Phone number
     email: Optional[str] = None
     password: str
+    turnstile_token: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_account(self):
@@ -14,6 +15,11 @@ class LoginRequest(BaseModel):
         if not self.account:
             raise ValueError("account or email field is required for login")
         return self
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
 
 
 class TokenResponse(BaseModel):

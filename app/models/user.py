@@ -26,6 +26,7 @@ class User(Base):
         Enum(UserRole), default=UserRole.USER, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     loyalty_points: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     loyalty_tier: Mapped[str] = mapped_column(String(20), default="bronze", nullable=False)
 

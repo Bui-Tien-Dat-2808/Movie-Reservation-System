@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     VNPAY_URL: str = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
     VNPAY_RETURN_URL: str = ""
 
+    # Cloudflare Turnstile CAPTCHA
+    TURNSTILE_SITE_KEY: str = "1x00000000000000000000AA"
+    TURNSTILE_SECRET_KEY: str = "1x0000000000000000000000000000000AA"
+
     # Cache TTLs (seconds)
     CACHE_TTL_MOVIES: int = 300        # 5 minutes
     CACHE_TTL_SHOWTIMES: int = 60      # 1 minute

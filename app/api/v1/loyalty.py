@@ -14,10 +14,12 @@ router = APIRouter(prefix="/loyalty", tags=["Loyalty"])
 
 @router.get("/me", response_model=LoyaltyStatusResponse)
 async def get_my_loyalty(
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return await LoyaltyService.get_user_loyalty(db, current_user.id)
+    return await LoyaltyService.get_user_loyalty(db, current_user.id, start_date, end_date)
 
 
 @router.get("/users", response_model=List[UserListResponse])
@@ -35,7 +37,27 @@ async def list_loyalty_users(
             (User.full_name.ilike(f"%{q}%")) | (User.email.ilike(f"%{q}%"))
         )
     result = await db.execute(query)
-    return result.scalars().all()
+    users = list(result.scalars().all())
+
+    # Sync loyalty_tier for each user
+    for u in users:
+        pts = u.loyalty_points or 0
+        u.loyalty_tier = LoyaltyService.calculate_tier(pts)
+    return users
+
+
+@router.get("/users/{user_id}", response_model=LoyaltyStatusResponse)
+async def get_user_loyalty_detail(
+    user_id: int,
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    try:
+        return await LoyaltyService.get_user_loyalty(db, user_id, start_date, end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.post("/adjust", response_model=PointTransactionResponse)
