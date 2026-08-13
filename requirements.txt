@@ -30,3 +30,8 @@ structlog==24.2.0
 
 # Date/Time
 python-dateutil==2.9.0
+
+# Email & Barcode
+qrcode[pil]==7.4.2
+pillow==10.3.0
+python-barcode==0.16.1

@@ -34,7 +34,8 @@ async def test_initiate_refund_success():
         "vnp_Message": "Merchant service not allowed for refund API on Sandbox"
     }
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+         patch.object(service, "_trigger_refund_email", new_callable=AsyncMock):
         mock_post.return_value = mock_resp
 
         refund = await service.initiate_refund(payment, reason="Khách hàng huỷ vé")
@@ -60,7 +61,8 @@ async def test_resolve_refund_manually():
         status="manual_required"
     )
 
-    with patch.object(service, "get_refund", return_value=existing_refund):
+    with patch.object(service, "get_refund", return_value=existing_refund), \
+         patch.object(service, "_trigger_refund_email", new_callable=AsyncMock):
         result = await service.resolve_refund_manually(refund_id=1, admin_id=2, admin_note="Đã chuyển khoản ngoài")
 
         assert result.status == "success"

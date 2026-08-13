@@ -54,7 +54,7 @@ async def update_me(
     if data.region is not None:
         current_user.region = data.region
 
-    await db.flush()
+    await db.commit()
     await db.refresh(current_user)
     return current_user
 

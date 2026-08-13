@@ -66,7 +66,42 @@ class RefundService:
             refund.vnpay_response_message = f"Lỗi kết nối API VNPay: {str(e)}"
 
         await self.db.flush()
+
+        # Trigger refund email notification
+        is_success = (refund.status == "success")
+        note_or_reason = "Xác nhận hoàn tiền thành công cho khách" if is_success else "Không thể hoàn tự động qua VNPAY"
+        await self._trigger_refund_email(refund.id, is_success=is_success, note_or_reason=note_or_reason)
+
         return refund
+
+    async def _trigger_refund_email(self, refund_id: int, is_success: bool, note_or_reason: str):
+        """Helper to safely extract user and movie details and trigger thread-safe refund email."""
+        try:
+            r = await self.get_refund(refund_id)
+            user = r.reservation.user if r.reservation else None
+            showtime = r.reservation.showtime if r.reservation else None
+            movie = showtime.movie if showtime and getattr(showtime, "movie", None) else None
+
+            if user and user.email:
+                ticket_code = r.reservation.ticket_code if r.reservation else f"#{r.reservation_id}"
+                movie_title = movie.title if movie else "Xem Phim CineVerse"
+                amount = r.amount
+
+                import asyncio
+                from app.services.email_service import EmailService
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        EmailService.send_refund_notification_email,
+                        user.email,
+                        ticket_code,
+                        movie_title,
+                        amount,
+                        is_success,
+                        note_or_reason,
+                    )
+                )
+        except Exception as e:
+            logger.warning("trigger_refund_email_failed", refund_id=refund_id, error=str(e))
 
     async def _call_vnpay_refund_api(
         self, payment: PaymentTransaction, amount: Decimal, vnp_request_id: str, reason: str
@@ -146,12 +181,16 @@ class RefundService:
         """Mark refund as resolved manually by admin."""
         refund = await self.get_refund(refund_id)
         refund.status = "success"
-        refund.admin_note = admin_note or "Đã xử lý chuyển khoản hoàn tiền thủ công"
+        refund.admin_note = admin_note or "Xác nhận hoàn tiền thành công cho khách"
         refund.resolved_by_admin_id = admin_id
         refund.resolved_at = datetime.now(timezone.utc)
 
         await self.db.flush()
         logger.info("Refund marked resolved manually by admin", refund_id=refund_id, admin_id=admin_id)
+
+        # Trigger success email notification
+        await self._trigger_refund_email(refund.id, is_success=True, note_or_reason=refund.admin_note)
+
         return refund
 
     async def retry_refund(self, refund_id: int) -> RefundTransaction:
@@ -185,6 +224,12 @@ class RefundService:
             refund.vnpay_response_message = f"Thử lại thất bại: {str(e)}"
 
         await self.db.flush()
+
+        # Trigger refund email notification on retry
+        is_success = (refund.status == "success")
+        note_or_reason = "Xác nhận hoàn tiền thành công cho khách" if is_success else "Không thể hoàn tự động qua VNPAY"
+        await self._trigger_refund_email(refund.id, is_success=is_success, note_or_reason=note_or_reason)
+
         return refund
 
     async def list_refunds(

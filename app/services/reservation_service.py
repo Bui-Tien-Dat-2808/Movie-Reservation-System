@@ -16,6 +16,7 @@ from app.core.exceptions import (
 from app.models.reservation import Reservation, ReservationSeat, ReservationStatus
 from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+from app.models.user import User
 from app.schemas.reservation import ReservationCreate
 from app.services.cache_service import CacheService
 from app.utils.datetime_utils import ensure_utc
@@ -617,6 +618,31 @@ class ReservationService:
 
         await self.db.commit()
         await self.db.refresh(reservation)
+
+        # 5. Dispatch Automated Ticket Email with Barcode (Thread-safe)
+        try:
+            user_res = await self.db.execute(select(User).where(User.id == reservation.user_id))
+            user_obj = user_res.scalar_one_or_none()
+            if user_obj and user_obj.email:
+                full_res = await self.get_reservation(reservation.id)
+                ticket_code = full_res.ticket_code or f"#{full_res.id}"
+                from app.services.email_service import EmailService
+                html_content = EmailService.build_ticket_email_html(full_res)
+                barcode_bytes = EmailService.generate_barcode_bytes(ticket_code)
+
+                import asyncio
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        EmailService.send_ticket_email_raw,
+                        user_obj.email,
+                        ticket_code,
+                        html_content,
+                        barcode_bytes,
+                    )
+                )
+        except Exception as e:
+            logger.warning("email_dispatch_trigger_failed", reservation_id=reservation.id, error=str(e))
+
         return reservation
 
     async def cancel_pending_reservation(

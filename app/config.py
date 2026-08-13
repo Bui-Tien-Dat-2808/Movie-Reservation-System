@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     TURNSTILE_SITE_KEY: str = "1x00000000000000000000AA"
     TURNSTILE_SECRET_KEY: str = "1x0000000000000000000000000000000AA"
 
+    # SMTP Email Configuration
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    EMAILS_FROM_EMAIL: str = "noreply@cineverse.vn"
+    EMAILS_FROM_NAME: str = "CineVerse Cinema"
+    EMAIL_ENABLED: bool = False
+
     # Cache TTLs (seconds)
     CACHE_TTL_MOVIES: int = 300        # 5 minutes
     CACHE_TTL_SHOWTIMES: int = 60      # 1 minute
