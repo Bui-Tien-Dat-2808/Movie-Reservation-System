@@ -120,7 +120,6 @@ class TMDBService:
             "release_date": release_date,
             "original_language": data.get("original_language"),
             "vote_average": data.get("vote_average"),
-            "popularity": data.get("popularity"),
             "genres": genre_names,
         }
 
@@ -151,7 +150,6 @@ class TMDBService:
                 "overview": movie.get("overview"),
                 "poster_url": poster_url,
                 "release_date": movie.get("release_date"),
-                "popularity": movie.get("popularity"),
             })
 
         return {
@@ -187,7 +185,6 @@ class TMDBService:
                 "overview": movie.get("overview"),
                 "poster_url": poster_url,
                 "release_date": movie.get("release_date"),
-                "popularity": movie.get("popularity"),
             })
 
         return {
@@ -222,7 +219,6 @@ class TMDBService:
                 "overview": movie.get("overview"),
                 "poster_url": poster_url,
                 "release_date": movie.get("release_date"),
-                "popularity": movie.get("popularity"),
             })
 
         return {
@@ -258,7 +254,6 @@ class TMDBService:
                 "overview": movie.get("overview"),
                 "poster_url": poster_url,
                 "release_date": movie.get("release_date"),
-                "popularity": movie.get("popularity"),
             })
 
         return {

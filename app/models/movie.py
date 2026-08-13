@@ -2,7 +2,7 @@ import enum
 from datetime import date
 from typing import List, Optional
 
-from sqlalchemy import Boolean, Date, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -41,7 +41,6 @@ class Movie(Base):
     language: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     rating: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # e.g. PG-13
     director: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    popularity: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.0)
     tmdb_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True, index=True)
     status: Mapped[MovieStatus] = mapped_column(
         Enum(MovieStatus), default=MovieStatus.NOW_SHOWING, nullable=False

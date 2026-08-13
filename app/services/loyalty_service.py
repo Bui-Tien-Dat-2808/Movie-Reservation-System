@@ -158,49 +158,21 @@ class LoyaltyService:
         return transaction
 
     @classmethod
-    async def get_user_loyalty(
-        cls,
-        db: AsyncSession,
-        user_id: int,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-    ) -> dict:
+    async def get_user_loyalty(cls, db: AsyncSession, user_id: int) -> dict:
         user_result = await db.execute(select(User).where(User.id == user_id))
         user = user_result.scalar_one_or_none()
         if not user:
             raise ValueError("User not found")
 
-        # Auto sync user tier based on points
-        pts = user.loyalty_points or 0
-        expected_tier = cls.calculate_tier(pts)
-        if user.loyalty_tier != expected_tier:
-            user.loyalty_tier = expected_tier
-            await db.flush()
-
-        # Build transaction query
-        tx_query = select(PointTransaction).where(PointTransaction.user_id == user_id)
-
-        if start_date:
-            try:
-                s_dt = datetime.fromisoformat(start_date).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                tx_query = tx_query.where(PointTransaction.created_at >= s_dt)
-            except ValueError:
-                pass
-
-        if end_date:
-            try:
-                e_dt = datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc)
-                tx_query = tx_query.where(PointTransaction.created_at <= e_dt)
-            except ValueError:
-                pass
-
-        tx_query = tx_query.order_by(PointTransaction.created_at.desc())
-        tx_result = await db.execute(tx_query)
+        tx_result = await db.execute(
+            select(PointTransaction)
+            .where(PointTransaction.user_id == user_id)
+            .order_by(PointTransaction.created_at.desc())
+        )
         transactions = tx_result.scalars().all()
-
-        info = cls.tier_info(pts)
+        info = cls.tier_info(user.loyalty_points or 0)
         return {
-            "points": pts,
+            "points": user.loyalty_points or 0,
             "tier": info["tier"],
             "tier_label": info["label"],
             "tier_color": info["color"],
