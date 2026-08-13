@@ -45,6 +45,12 @@ class AuthService:
             if phone_res.scalar_one_or_none():
                 raise ConflictException(f"Số điện thoại '{data.phone_number}' đã được đăng ký")
 
+        # Verify Cloudflare Turnstile token if provided
+        if data.turnstile_token:
+            valid_turnstile = await self.verify_turnstile(data.turnstile_token)
+            if not valid_turnstile:
+                raise ValidationException("Mã xác thực Turnstile (CAPTCHA) không hợp lệ.")
+
         user = User(
             email=data.email,
             phone_number=data.phone_number,
@@ -65,6 +71,12 @@ class AuthService:
     async def login(self, data: LoginRequest) -> TokenResponse:
         """Authenticate user by email OR phone_number and return tokens."""
         from sqlalchemy import or_
+
+        # Verify Cloudflare Turnstile token if provided
+        if data.turnstile_token:
+            valid_turnstile = await self.verify_turnstile(data.turnstile_token)
+            if not valid_turnstile:
+                raise InvalidCredentialsException("Mã xác thực Turnstile (CAPTCHA) không hợp lệ.")
 
         result = await self.db.execute(
             select(User).where(
