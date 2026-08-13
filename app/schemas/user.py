@@ -17,6 +17,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8, max_length=100)
+    turnstile_token: Optional[str] = None
 
     @field_validator("password")
     @classmethod
@@ -41,6 +42,7 @@ class UserResponse(UserBase):
     id: int
     role: UserRole
     is_active: bool
+    must_change_password: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -54,6 +56,8 @@ class UserListResponse(BaseModel):
     phone_number: Optional[str] = None
     role: UserRole
     is_active: bool
+    loyalty_points: int = 0
+    loyalty_tier: str = "bronze"
     created_at: datetime
 
     model_config = {"from_attributes": True}

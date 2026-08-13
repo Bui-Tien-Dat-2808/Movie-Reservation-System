@@ -247,6 +247,7 @@ class MovieService:
             release_date=data.release_date,
             language=data.language,
             rating=data.rating,
+            popularity=data.popularity or 0.0,
             status=data.status,
             tmdb_id=data.tmdb_id,
             is_active=True,
@@ -323,6 +324,8 @@ class MovieService:
             movie.duration_minutes = tmdb_data.get("runtime")
             movie.release_date = tmdb_data.get("release_date")
             movie.language = tmdb_data.get("original_language")
+            if tmdb_data.get("popularity") is not None:
+                movie.popularity = tmdb_data.get("popularity")
             movie.status = inferred_status
         else:
             # Create new
@@ -333,6 +336,7 @@ class MovieService:
                 duration_minutes=tmdb_data.get("runtime"),
                 release_date=tmdb_data.get("release_date"),
                 language=tmdb_data.get("original_language"),
+                popularity=tmdb_data.get("popularity") or 0.0,
                 tmdb_id=tmdb_id,
                 status=inferred_status,
                 is_active=True,

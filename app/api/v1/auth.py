@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import bearer_scheme, get_current_user, get_db, get_redis
 from app.schemas.auth import (
     AccessTokenResponse,
+    ChangePasswordRequest,
     LoginRequest,
     LogoutRequest,
     RefreshTokenRequest,
@@ -110,3 +111,20 @@ async def logout(
     service = AuthService(None, CacheService(redis))
     access_token = credentials.credentials if credentials else None
     await service.logout(current_user.id, data.refresh_token, access_token)
+
+
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_200_OK,
+    summary="Change password and reset must_change_password flag",
+)
+async def change_password(
+    data: ChangePasswordRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Change current user's password."""
+    service = AuthService(db, CacheService(redis))
+    await service.change_password(current_user.id, data.old_password, data.new_password)
+    return {"message": "Mật khẩu đã được thay đổi thành công."}

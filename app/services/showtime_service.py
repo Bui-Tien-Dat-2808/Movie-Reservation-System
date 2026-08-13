@@ -398,8 +398,18 @@ class ShowtimeService:
                 selectinload(Movie.movie_genres).selectinload(MovieGenre.genre)
             )
         )
+        movie_query = (
+            select(Movie)
+            .where(Movie.is_active == True)
+            .options(
+                selectinload(Movie.movie_genres).selectinload(MovieGenre.genre)
+            )
+        )
         if req.movie_ids:
-            movie_query = movie_query.where(Movie.id.in_(req.movie_ids))
+            movie_query = movie_query.where(
+                Movie.id.in_(req.movie_ids),
+                Movie.status.in_([MovieStatus.NOW_SHOWING, MovieStatus.COMING_SOON]),
+            )
         else:
             movie_query = movie_query.where(
                 Movie.status.in_([MovieStatus.NOW_SHOWING, MovieStatus.COMING_SOON])
@@ -411,17 +421,18 @@ class ShowtimeService:
         if not movies:
             raise ValidationException("No active movies found for auto-scheduling")
 
+        room_query = select(Room).where(Room.is_active == True).options(selectinload(Room.seats))
         if req.room_ids:
-            room_res = await self.db.execute(
-                select(Room).where(Room.id.in_(req.room_ids), Room.is_active == True)
-            )
-            rooms = room_res.scalars().all()
-        else:
-            room_res = await self.db.execute(select(Room).where(Room.is_active == True))
-            rooms = room_res.scalars().all()
+            room_query = room_query.where(Room.id.in_(req.room_ids))
+
+        room_res = await self.db.execute(room_query)
+        rooms = room_res.scalars().all()
 
         if not rooms:
             raise ValidationException("No active screening rooms found")
+
+        # B4: Sort rooms by seat capacity descending so high-demand movies are assigned to larger rooms first
+        rooms = sorted(rooms, key=lambda r: len(r.seats) if r.seats else 0, reverse=True)
 
         proposed_list = []
         movie_idx_by_type: dict = {}
@@ -432,19 +443,56 @@ class ShowtimeService:
 
         KIDS_SAFE_RATINGS = {"P", "K", "T13", "G", "PG", "PG-13"}
 
+        def build_weighted_pool(candidate_movies: list) -> list:
+            """Build a weighted movie rotation list based on popularity (max 3x weight),
+            interleaved so high popularity movies don't cluster consecutively.
+            """
+            if not candidate_movies:
+                return []
+            pops = [m.popularity or 0 for m in candidate_movies]
+            avg_pop = sum(pops) / len(pops) if any(pops) else 1
+            if avg_pop <= 0:
+                return list(candidate_movies)
+
+            weighted = []
+            for m in candidate_movies:
+                weight = max(1, min(3, round((m.popularity or 0) / avg_pop)))
+                weighted.extend([m] * weight)
+
+            import itertools
+            buckets = {}
+            for m in weighted:
+                buckets.setdefault(m.id, []).append(m)
+            interleaved = [m for group in itertools.zip_longest(*buckets.values()) for m in group if m]
+            return interleaved
+
+        def get_time_band(local_hour: int) -> str:
+            """Return dayparting band for a given local hour."""
+            if local_hour < 12:
+                return "off_peak"
+            if local_hour >= 18:
+                return "peak"
+            return "standard"
+
         curr_d = start_d
         while curr_d <= end_d:
-            # Filter candidate movies whose release_date has arrived on or before curr_d
+            # A1: Filter candidate movies whose release_date has arrived on or before curr_d
             day_movies = [m for m in movies if not m.release_date or m.release_date <= curr_d]
             if not day_movies:
-                day_movies = movies
+                # Do NOT fallback to all movies; skip the day if no movies released
+                curr_d += timedelta(days=1)
+                continue
+
+            # B3: Check if current day is weekend (Friday=4, Saturday=5, Sunday=6)
+            is_weekend = curr_d.weekday() >= 4
+            WEEKEND_MULTIPLIER = Decimal("1.1") if is_weekend else Decimal("1.0")
 
             for room in rooms:
-                # Dynamic Pricing Multiplier
+                # Dynamic Pricing Multiplier by Room Type
                 if getattr(req, "auto_pricing_by_room_type", True):
                     mult = ROOM_TYPE_MULTIPLIERS.get(room.room_type, Decimal("1.0"))
-                    calc_base = (req.base_price * mult).quantize(Decimal("1000"))
-                    calc_vip = (req.vip_price * mult).quantize(Decimal("1000"))
+                    calc_base = req.base_price * mult
+                    calc_vip = req.vip_price * mult
                 else:
                     calc_base = req.base_price
                     calc_vip = req.vip_price
@@ -490,29 +538,15 @@ class ShowtimeService:
                         effective_movies = day_movies
                         genre_lookup = {}
 
-                # Dynamic Rotation: Offset movie rotation by room index and day offset
-                # to guarantee smooth time slot rotation and broad room type coverage across days
+                # B1: Apply weighted pool rotation according to movie popularity
+                effective_movies = build_weighted_pool(effective_movies)
+
+                # Dynamic Rotation Index
                 room_idx = rooms.index(room)
                 day_offset = (curr_d - start_d).days
                 idx_key = f"{room.room_type}_{room.id}"
                 base_start_idx = day_offset * 5 + room_idx * 3
                 movie_idx = movie_idx_by_type.get(idx_key, base_start_idx)
-
-                start_dt_bound = datetime.combine(curr_d, time_cls(0, 0), tzinfo=cinema_tz).astimezone(timezone.utc)
-                end_dt_bound = datetime.combine(curr_d, time_cls(23, 59, 59), tzinfo=cinema_tz).astimezone(timezone.utc)
-
-                if getattr(req, "replace_existing", True):
-                    existing_st = []
-                else:
-                    existing_res = await self.db.execute(
-                        select(Showtime).where(
-                            Showtime.room_id == room.id,
-                            Showtime.status != ShowtimeStatus.CANCELLED,
-                            Showtime.start_time >= start_dt_bound,
-                            Showtime.start_time <= end_dt_bound,
-                        ).order_by(Showtime.start_time.asc())
-                    )
-                    existing_st = existing_res.scalars().all()
 
                 start_h, start_m = 8, 0
                 end_h, end_m = 23, 30
@@ -530,9 +564,34 @@ class ShowtimeService:
                         end_h, end_m = int(parts[0]), int(parts[1])
                 elif getattr(req, "end_hour", None) is not None:
                     end_h = req.end_hour
+                elif is_weekend:
+                    # B3: Extend weekend closing time to 00:30 AM next day by default
+                    end_h, end_m = 0, 30
 
                 day_start_dt = datetime.combine(curr_d, time_cls(start_h, start_m), tzinfo=cinema_tz).astimezone(timezone.utc)
-                day_end_dt = datetime.combine(curr_d, time_cls(end_h, end_m), tzinfo=cinema_tz).astimezone(timezone.utc)
+
+                if end_h < start_h or (end_h == 0 and end_m > 0):
+                    end_date_for_day = curr_d + timedelta(days=1)
+                else:
+                    end_date_for_day = curr_d
+
+                day_end_dt = datetime.combine(end_date_for_day, time_cls(end_h, end_m), tzinfo=cinema_tz).astimezone(timezone.utc)
+
+                start_dt_bound = datetime.combine(curr_d, time_cls(0, 0), tzinfo=cinema_tz).astimezone(timezone.utc)
+                end_dt_bound = day_end_dt
+
+                if getattr(req, "replace_existing", True):
+                    existing_st = []
+                else:
+                    existing_res = await self.db.execute(
+                        select(Showtime).where(
+                            Showtime.room_id == room.id,
+                            Showtime.status != ShowtimeStatus.CANCELLED,
+                            Showtime.start_time >= start_dt_bound,
+                            Showtime.start_time <= end_dt_bound,
+                        ).order_by(Showtime.start_time.asc())
+                    )
+                    existing_st = existing_res.scalars().all()
 
                 slot_time = day_start_dt
 
@@ -541,7 +600,18 @@ class ShowtimeService:
                         slot_time += timedelta(minutes=30)
                         continue
 
-                    m = effective_movies[movie_idx % len(effective_movies)]
+                    # B2: Dayparting movie selection
+                    local_hour = slot_time.astimezone(cinema_tz).hour
+                    band = get_time_band(local_hour)
+
+                    if band == "peak":
+                        pool = sorted(effective_movies, key=lambda x: -(x.popularity or 0))
+                    elif band == "off_peak":
+                        pool = sorted(effective_movies, key=lambda x: (x.popularity or 0))
+                    else:
+                        pool = effective_movies
+
+                    m = pool[movie_idx % len(pool)]
                     duration_mins = m.duration_minutes or 120
                     st_end = slot_time + timedelta(minutes=duration_mins)
 
@@ -562,6 +632,17 @@ class ShowtimeService:
 
                     matched_g = genre_lookup.get(m.id)
 
+                    # B2 + B3: Calculate price combining room type, time band, and weekend multipliers
+                    TIME_BAND_MULTIPLIERS = {
+                        "off_peak": Decimal("0.85"),
+                        "standard": Decimal("1.0"),
+                        "peak": Decimal("1.15"),
+                    }
+                    band_mult = TIME_BAND_MULTIPLIERS[band]
+
+                    slot_base_price = (calc_base * band_mult * WEEKEND_MULTIPLIER).quantize(Decimal("1000"))
+                    slot_vip_price = (calc_vip * band_mult * WEEKEND_MULTIPLIER).quantize(Decimal("1000"))
+
                     proposed_list.append(
                         ProposedShowtimeItem(
                             movie_id=m.id,
@@ -572,8 +653,8 @@ class ShowtimeService:
                             matched_genre=matched_g,
                             start_time=slot_time,
                             end_time=st_end,
-                            base_price=calc_base,
-                            vip_price=calc_vip,
+                            base_price=slot_base_price,
+                            vip_price=slot_vip_price,
                         )
                     )
 
@@ -623,6 +704,17 @@ class ShowtimeService:
                 await self.db.flush()
                 logger.info("Replaced existing showtimes", cancelled_count=len(old_sts))
 
+        # Pre-fetch all rooms with active seats into a dictionary map for high performance
+        all_room_ids = list({item.room_id for item in showtimes_data})
+        rooms_res = await self.db.execute(
+            select(Room).options(selectinload(Room.seats)).where(Room.id.in_(all_room_ids))
+        )
+        rooms_list = rooms_res.scalars().all()
+        room_seats_map = {
+            r.id: [s for s in (r.seats or []) if s.is_active]
+            for r in rooms_list
+        }
+
         count = 0
         for item in showtimes_data:
             st = Showtime(
@@ -637,23 +729,18 @@ class ShowtimeService:
             self.db.add(st)
             await self.db.flush()
 
-            room = await self.db.get(Room, item.room_id)
-            if room:
-                await self.db.refresh(room, attribute_names=["seats"])
-                if not room.seats:
-                    logger.warning("Screening room has no seats configured", room_id=item.room_id)
-                for seat in room.seats:
-                    if seat.is_active:
-                        ss = ShowtimeSeat(
-                            showtime_id=st.id,
-                            seat_id=seat.id,
-                            status=SeatStatus.AVAILABLE,
-                        )
-                        self.db.add(ss)
-            else:
-                logger.warning("Room not found during auto-schedule confirm", room_id=item.room_id)
+            active_seats = room_seats_map.get(item.room_id, [])
+            if active_seats:
+                showtime_seats = [
+                    ShowtimeSeat(
+                        showtime_id=st.id,
+                        seat_id=seat.id,
+                        status=SeatStatus.AVAILABLE,
+                    )
+                    for seat in active_seats
+                ]
+                self.db.add_all(showtime_seats)
             count += 1
-            logger.info("Auto-scheduled showtime created", showtime_id=st.id, movie_id=st.movie_id, room_id=st.room_id)
 
         await self.db.commit()
         await self.cache.delete_pattern("showtimes:*")

@@ -283,6 +283,31 @@ class ReservationService:
         reservation.status = ReservationStatus.CANCELLED
         await self.db.flush()
 
+        # Create refund request if ticket was paid via VNPay
+        from app.models.payment import PaymentTransaction
+        payment_result = await self.db.execute(
+            select(PaymentTransaction)
+            .where(
+                PaymentTransaction.reservation_id == reservation.id,
+                PaymentTransaction.status == "success",
+            )
+            .order_by(PaymentTransaction.id.desc())
+        )
+        payment = payment_result.scalar_one_or_none()
+
+        if payment:
+            from app.services.refund_service import RefundService
+            refund_service = RefundService(self.db)
+            try:
+                await refund_service.initiate_refund(payment, reason="Khách hàng huỷ vé")
+            except Exception:
+                logger.exception(
+                    "Không thể khởi tạo hoàn tiền tự động cho reservation_id=%s — cần xử lý thủ công",
+                    reservation.id,
+                )
+
+        await self.db.flush()
+
         # Revoke loyalty points for cancelled booking
         from app.services.loyalty_service import LoyaltyService
         await LoyaltyService.revoke_points(self.db, reservation)
