@@ -105,7 +105,7 @@ async def promote_user(
         raise NotFoundException("User", user_id)
 
     user.role = UserRole.ADMIN
-    await db.flush()
+    await db.commit()
     await db.refresh(user)
     logger.info("User promoted to admin", user_id=user_id)
     return user
@@ -133,5 +133,5 @@ async def deactivate_user(
         raise NotFoundException("User", user_id)
 
     user.is_active = False
-    await db.flush()
+    await db.commit()
     logger.info("User deactivated", user_id=user_id)

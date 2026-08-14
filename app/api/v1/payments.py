@@ -86,7 +86,7 @@ async def create_payment_url(
             amount=reservation.total_price,
             order_info=order_info,
             client_ip=client_ip,
-            return_url=f"{settings.FRONTEND_BASE_URL}/api/v1/payments/vnpay-return",
+            return_url=f"{settings.BACKEND_BASE_URL}/api/v1/payments/vnpay-return",
         )
     except Exception as e:
         logger.exception("Lỗi khi tạo VNPay payment URL cho reservation_id=%s", reservation.id)

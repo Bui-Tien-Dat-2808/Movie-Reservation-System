@@ -647,7 +647,7 @@ class ReservationService:
         return reservation
 
     async def cancel_pending_reservation(
-        self, reservation_id: int, vnp_params: dict = None, reason: str = "Thanh toán thất bại hoặc quá hạn"
+        self, reservation_id: int, vnp_params: Optional[dict] = None, reason: str = "Thanh toán thất bại hoặc quá hạn"
     ) -> Reservation:
         """
         Transition reservation from PENDING -> CANCELLED, release seats to AVAILABLE,
