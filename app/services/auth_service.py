@@ -72,12 +72,6 @@ class AuthService:
         """Authenticate user by email OR phone_number and return tokens."""
         from sqlalchemy import or_
 
-        # Verify Cloudflare Turnstile token if provided
-        if data.turnstile_token:
-            valid_turnstile = await self.verify_turnstile(data.turnstile_token)
-            if not valid_turnstile:
-                raise InvalidCredentialsException("Mã xác thực Turnstile (CAPTCHA) không hợp lệ.")
-
         result = await self.db.execute(
             select(User).where(
                 or_(

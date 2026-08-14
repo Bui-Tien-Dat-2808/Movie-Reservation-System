@@ -1,5 +1,6 @@
+import base64
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import bearer_scheme, get_current_user, get_db, get_redis
@@ -14,6 +15,7 @@ from app.schemas.auth import (
 from app.schemas.user import UserCreate, UserResponse
 from app.services.auth_service import AuthService
 from app.services.cache_service import CacheService
+from app.services.captcha_service import CaptchaService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = structlog.get_logger()
@@ -42,6 +44,18 @@ async def check_rate_limit(redis_client, key: str, max_requests: int = 5, window
         logger.warning("Rate limit check skipped/failed", error=str(e))
 
 
+@router.get("/captcha", summary="Sinh CAPTCHA ảnh mới")
+async def get_captcha(request: Request, redis=Depends(get_redis)):
+    """Generate a new image CAPTCHA challenge with rate limiting (60 requests/min per IP)."""
+    client_ip = request.client.host if request.client else "unknown"
+    await check_rate_limit(redis, f"ratelimit:captcha:{client_ip}", max_requests=60, window_seconds=60)
+    captcha_id, image_bytes = await CaptchaService.create_challenge()
+    return {
+        "captcha_id": captcha_id,
+        "image": f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}",
+    }
+
+
 @router.post(
     "/register",
     response_model=UserResponse,
@@ -54,6 +68,13 @@ async def register(
     redis=Depends(get_redis),
 ):
     """Register a new user account with rate limiting."""
+    # Verify CAPTCHA first
+    if not data.captcha_id or not data.captcha_answer or not await CaptchaService.verify(data.captcha_id, data.captcha_answer):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không đúng hoặc đã hết hạn, vui lòng thử lại.",
+        )
+
     await check_rate_limit(redis, f"ratelimit:register:{data.email}")
     service = AuthService(db, CacheService(redis))
     user = await service.register(data)
@@ -75,6 +96,13 @@ async def login(
     - **access_token**: short-lived JWT (30 min)
     - **refresh_token**: long-lived token (7 days)
     """
+    # Verify CAPTCHA first
+    if not data.captcha_id or not data.captcha_answer or not await CaptchaService.verify(data.captcha_id, data.captcha_answer):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không đúng hoặc đã hết hạn, vui lòng thử lại.",
+        )
+
     await check_rate_limit(redis, f"ratelimit:login:{data.account}")
     service = AuthService(db, CacheService(redis))
     return await service.login(data)

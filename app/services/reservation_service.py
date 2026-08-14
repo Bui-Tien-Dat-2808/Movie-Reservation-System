@@ -631,7 +631,8 @@ class ReservationService:
                 barcode_bytes = EmailService.generate_barcode_bytes(ticket_code)
 
                 import asyncio
-                asyncio.create_task(
+                from app.utils.background import fire_and_forget
+                fire_and_forget(
                     asyncio.to_thread(
                         EmailService.send_ticket_email_raw,
                         user_obj.email,

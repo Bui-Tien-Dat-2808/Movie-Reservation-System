@@ -89,7 +89,8 @@ class RefundService:
 
                 import asyncio
                 from app.services.email_service import EmailService
-                asyncio.create_task(
+                from app.utils.background import fire_and_forget
+                fire_and_forget(
                     asyncio.to_thread(
                         EmailService.send_refund_notification_email,
                         user.email,

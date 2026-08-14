@@ -6,7 +6,8 @@ class LoginRequest(BaseModel):
     account: Optional[str] = None  # Email or Phone number
     email: Optional[str] = None
     password: str
-    turnstile_token: Optional[str] = None
+    captcha_id: Optional[str] = None
+    captcha_answer: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_account(self):

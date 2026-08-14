@@ -17,7 +17,8 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8, max_length=100)
-    turnstile_token: Optional[str] = None
+    captcha_id: Optional[str] = None
+    captcha_answer: Optional[str] = None
 
     @field_validator("password")
     @classmethod

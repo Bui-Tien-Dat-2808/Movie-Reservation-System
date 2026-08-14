@@ -57,10 +57,6 @@ class Settings(BaseSettings):
     VNPAY_URL: str = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
     VNPAY_RETURN_URL: str = ""
 
-    # Cloudflare Turnstile CAPTCHA
-    TURNSTILE_SITE_KEY: str = "1x00000000000000000000AA"
-    TURNSTILE_SECRET_KEY: str = "1x0000000000000000000000000000000AA"
-
     # SMTP Email Configuration
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
