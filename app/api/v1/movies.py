@@ -94,6 +94,10 @@ async def list_movies(
     return paginate(movies, total, pagination.page, pagination.page_size)
 
 
+from urllib.parse import quote_plus
+import json
+
+
 @router.get(
     "/{movie_id}",
     response_model=MovieResponse,
@@ -102,9 +106,68 @@ async def list_movies(
 async def get_movie(
     movie_id: int,
     service: MovieService = Depends(get_movie_service),
+    db: AsyncSession = Depends(get_db),
 ):
     """Public: Get detailed information about a movie by ID (supports local ID or TMDB ID)."""
-    return await service.get_movie(movie_id)
+    movie = await service.get_movie(movie_id)
+
+    # 1. Parse cast from DB column if available
+    cast_data = None
+    if getattr(movie, "cast_json", None):
+        try:
+            cast_data = json.loads(movie.cast_json)
+        except Exception:
+            cast_data = None
+
+    # 2. Only call TMDB if database is actually missing critical data!
+    need_director = not movie.director or movie.director.strip() in ("", "Đang cập nhật", "N/A")
+    need_cast = not cast_data
+    need_trailer = movie.trailer_url is None
+
+    if movie.tmdb_id and (need_director or need_cast or need_trailer):
+        try:
+            tmdb_service = TMDBService()
+            # Calling get_movie fetches release_dates, videos, and credits in ONE single request!
+            tmdb_data = await tmdb_service.get_movie(movie.tmdb_id)
+            need_commit = False
+
+            if need_director and tmdb_data.get("director"):
+                movie.director = tmdb_data["director"]
+                need_commit = True
+
+            if need_cast and tmdb_data.get("cast"):
+                cast_data = tmdb_data["cast"]
+                movie.cast_json = json.dumps(cast_data, ensure_ascii=False)
+                need_commit = True
+
+            if need_trailer and tmdb_data.get("trailer_url"):
+                movie.trailer_url = tmdb_data["trailer_url"]
+                need_commit = True
+
+            if need_commit:
+                await db.commit()
+                await db.refresh(movie)
+        except Exception as e:
+            logger.warning("Failed to resolve TMDB details for movie", movie_id=movie_id, error=str(e))
+
+    # 3. Clean fallbacks (NO YouTube search URL fallback)
+    trailer_url = getattr(movie, "trailer_url", None)
+    director = movie.director
+    if not director or director.strip() in ("", "Đang cập nhật", "N/A"):
+        director = "Đang cập nhật"
+
+    description = movie.description
+    if not description or not description.strip():
+        description = "Nội dung bộ phim đang được cập nhật. Vui lòng theo dõi thêm thông tin chi tiết."
+
+    movie_resp = MovieResponse.model_validate(movie)
+    movie_resp.trailer_url = trailer_url
+    movie_resp.director = director
+    movie_resp.description = description
+    if cast_data:
+        movie_resp.cast = cast_data
+
+    return movie_resp
 
 
 @router.post(
@@ -332,6 +395,12 @@ async def auto_sync_tmdb(
     await service.auto_update_movie_statuses()
 
     await service.db.commit()
+
+    # Invalidate stale Redis movie cache so new trailers and movie details are instantly served
+    try:
+        await service.cache.delete_pattern("movies:*")
+    except Exception as e:
+        logger.warning("Failed to invalidate movie cache after auto-sync", error=str(e))
 
     # Recalculate totals in database
     now_res = await service.db.execute(

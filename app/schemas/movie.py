@@ -39,10 +39,18 @@ class MovieUpdate(BaseModel):
     genre_ids: Optional[List[int]] = None
 
 
+class CastMemberResponse(BaseModel):
+    name: str
+    character: Optional[str] = None
+    profile_url: Optional[str] = None
+
+
 class MovieResponse(MovieBase):
     id: int
     tmdb_id: Optional[int]
     is_active: bool
+    trailer_url: Optional[str] = None
+    cast: Optional[List[CastMemberResponse]] = None
     genres: List[GenreResponse] = []
     created_at: datetime
     updated_at: datetime
@@ -60,6 +68,8 @@ class MovieListResponse(BaseModel):
     rating: Optional[str]
     director: Optional[str]
     popularity: Optional[float] = None
+    trailer_url: Optional[str] = None
+    cast: Optional[List[CastMemberResponse]] = None
     status: MovieStatus
     genres: List[GenreResponse] = []
     created_at: datetime

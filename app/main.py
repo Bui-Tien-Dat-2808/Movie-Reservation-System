@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
@@ -86,6 +87,9 @@ Authorization: Bearer <access_token>
         lifespan=lifespan,
     )
 
+    # GZip compression middleware (compresses responses > 1KB)
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
+
     # CORS
     app.add_middleware(
         CORSMiddleware,
@@ -94,6 +98,15 @@ Authorization: Bearer <access_token>
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Security Headers Middleware
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        return response
 
     # Include API router
     app.include_router(api_router, prefix=settings.API_V1_PREFIX)
@@ -117,13 +130,25 @@ Authorization: Bearer <access_token>
             content={"detail": "Internal server error", "error_code": "INTERNAL_ERROR"},
         )
 
-    # Health check
+    # Extended Health check
     @app.get("/health", tags=["Health"], summary="Health Check")
     async def health_check():
+        db_status = "healthy"
+        try:
+            from sqlalchemy import text
+            from app.db.session import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                await db.execute(text("SELECT 1"))
+        except Exception as e:
+            db_status = f"unhealthy: {str(e)}"
+
         return {
-            "status": "healthy",
+            "status": "healthy" if db_status == "healthy" else "degraded",
             "version": settings.APP_VERSION,
             "environment": settings.ENVIRONMENT,
+            "components": {
+                "database": db_status,
+            },
         }
 
     return app

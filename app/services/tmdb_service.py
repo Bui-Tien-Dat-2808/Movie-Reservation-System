@@ -64,33 +64,103 @@ class TMDBService:
         clean_path = path.lstrip('/')
         return f"{self.image_base_url}/{clean_path}"
 
+    def _select_best_trailer(self, videos: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Select best YouTube trailer embed URL based on strict priority:
+        1. official == True AND type == "Trailer"
+        2. type == "Trailer"
+        3. type == "Teaser"
+        4. type == "Clip"
+        Within the top priority group, prefer matching language (vi/en) and newest published_at.
+        Only consider site == "YouTube" with non-empty key.
+        Return None if no valid YouTube video found (NO YouTube search URL fallback).
+        """
+        if not videos or not isinstance(videos, list):
+            return None
+
+        # Filter valid YouTube videos
+        yt_videos = [
+            v for v in videos
+            if isinstance(v, dict)
+            and v.get("site") == "YouTube"
+            and v.get("key")
+            and isinstance(v.get("key"), str)
+            and v["key"].strip()
+        ]
+
+        if not yt_videos:
+            return None
+
+        def video_score(v: Dict[str, Any]) -> tuple:
+            v_type = (v.get("type") or "").strip()
+            is_official = bool(v.get("official"))
+            lang = (v.get("iso_639_1") or "").lower()
+            pub = str(v.get("published_at") or "")
+
+            if is_official and v_type == "Trailer":
+                type_rank = 4
+            elif v_type == "Trailer":
+                type_rank = 3
+            elif v_type == "Teaser":
+                type_rank = 2
+            elif v_type == "Clip":
+                type_rank = 1
+            else:
+                type_rank = 0
+
+            if lang == "vi":
+                lang_rank = 2
+            elif lang == "en":
+                lang_rank = 1
+            else:
+                lang_rank = 0
+
+            return (type_rank, lang_rank, pub)
+
+        best = max(yt_videos, key=video_score)
+
+        if video_score(best)[0] == 0:
+            return None
+
+        clean_key = best["key"].strip()
+        return f"https://www.youtube.com/embed/{clean_key}"
+
     async def get_movie(self, tmdb_id: int) -> Dict[str, Any]:
-        """Fetch movie data from TMDB API with localized region release date."""
+        """Fetch movie data from TMDB API with localized region release date, videos, and credits in a single request."""
         headers, params = self._get_auth_headers_and_params({
             "language": self.language,
-            "append_to_response": "release_dates",
+            "append_to_response": "release_dates,videos,credits",
         })
 
-        async with self._get_client(headers) as client:
-            response = await client.get(
-                f"{self.base_url}/movie/{tmdb_id}",
-                params=params,
-            )
+        try:
+            async with self._get_client(headers) as client:
+                response = await client.get(
+                    f"{self.base_url}/movie/{tmdb_id}",
+                    params=params,
+                )
 
-        if response.status_code == 404:
-            raise NotFoundException("TMDB Movie", tmdb_id)
+            if response.status_code == 404:
+                raise NotFoundException("TMDB Movie", tmdb_id)
+            if response.status_code == 429:
+                logger.warning("TMDB API Rate Limit hit (429)", tmdb_id=tmdb_id, endpoint=f"/movie/{tmdb_id}", status_code=429)
+                response.raise_for_status()
 
-        response.raise_for_status()
-        data = response.json()
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("TMDB API HTTP error", tmdb_id=tmdb_id, status_code=e.response.status_code, error=str(e))
+            raise
+        except Exception as e:
+            logger.warning("TMDB API request failed", tmdb_id=tmdb_id, error=str(e))
+            raise
 
-        # Parse release_date: Try region-specific release date first (e.g. VN)
+        # 1. Parse release_date: Try region-specific release date first (e.g. VN)
         release_date = None
         region_results = data.get("release_dates", {}).get("results", [])
         matched_region = next((r for r in region_results if r.get("iso_3166_1") == self.region), None)
 
         if matched_region and matched_region.get("release_dates"):
             rd_list = matched_region["release_dates"]
-            # Prefer theatrical release (type 3 or 2), fallback to first available
             theatrical = next((rd for rd in rd_list if rd.get("type") in (2, 3)), None) or rd_list[0]
             if theatrical.get("release_date"):
                 try:
@@ -98,18 +168,36 @@ class TMDBService:
                 except (ValueError, TypeError):
                     pass
 
-        # Fallback to primary global release_date if region date was not found
         if not release_date and data.get("release_date"):
             try:
                 release_date = date.fromisoformat(data["release_date"])
             except (ValueError, TypeError):
                 pass
 
-        # Build poster URL safely
+        # 2. Build poster URL
         poster_url = self._build_image_url(data.get("poster_path"))
 
-        # Extract genres
+        # 3. Extract genres
         genre_names = [g["name"] for g in data.get("genres", []) if isinstance(g, dict) and "name" in g]
+
+        # 4. Extract trailer URL from videos
+        videos_list = data.get("videos", {}).get("results", [])
+        trailer_url = self._select_best_trailer(videos_list)
+
+        # 5. Extract credits (director & top cast)
+        credits_data = data.get("credits", {})
+        crew_list = credits_data.get("crew", [])
+        directors = [c.get("name") for c in crew_list if isinstance(c, dict) and c.get("job") == "Director"]
+        director_name = directors[0] if directors else None
+
+        cast_list = []
+        for c in credits_data.get("cast", [])[:8]:
+            if isinstance(c, dict) and c.get("name"):
+                cast_list.append({
+                    "name": c.get("name"),
+                    "character": c.get("character"),
+                    "profile_url": self._build_image_url(c.get("profile_path")),
+                })
 
         return {
             "tmdb_id": data["id"],
@@ -122,7 +210,57 @@ class TMDBService:
             "vote_average": data.get("vote_average"),
             "popularity": data.get("popularity"),
             "genres": genre_names,
+            "trailer_url": trailer_url,
+            "director": director_name,
+            "cast": cast_list,
         }
+
+    async def get_movie_trailer_url(self, tmdb_id: int) -> Optional[str]:
+        """Fetch official YouTube trailer embed URL for a movie using standalone videos endpoint if needed."""
+        if not tmdb_id or not self.api_key:
+            return None
+        try:
+            headers, params = self._get_auth_headers_and_params({"language": self.language})
+            async with self._get_client(headers) as client:
+                resp = await client.get(f"{self.base_url}/movie/{tmdb_id}/videos", params=params)
+
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                return self._select_best_trailer(results)
+            elif resp.status_code == 429:
+                logger.warning("TMDB rate limit hit (429)", tmdb_id=tmdb_id, endpoint="/videos", status_code=429)
+        except Exception as e:
+            logger.warning("Failed to fetch TMDB trailer", tmdb_id=tmdb_id, error=str(e))
+        return None
+
+    async def get_movie_credits(self, tmdb_id: int) -> Dict[str, Any]:
+        """Fetch director and top cast members from TMDB credits endpoint."""
+        if not tmdb_id or not self.api_key:
+            return {"director": None, "cast": []}
+        try:
+            headers, params = self._get_auth_headers_and_params({"language": "en-US"})
+            async with self._get_client(headers) as client:
+                resp = await client.get(f"{self.base_url}/movie/{tmdb_id}/credits", params=params)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                cast_list = []
+                for c in data.get("cast", [])[:8]:
+                    if isinstance(c, dict) and c.get("name"):
+                        cast_list.append({
+                            "name": c.get("name"),
+                            "character": c.get("character"),
+                            "profile_url": self._build_image_url(c.get("profile_path")),
+                        })
+                crew_list = data.get("crew", [])
+                directors = [c.get("name") for c in crew_list if isinstance(c, dict) and c.get("job") == "Director"]
+                director_name = directors[0] if directors else None
+                return {"director": director_name, "cast": cast_list}
+            elif resp.status_code == 429:
+                logger.warning("TMDB rate limit hit (429)", tmdb_id=tmdb_id, endpoint="/credits", status_code=429)
+        except Exception as e:
+            logger.warning("Failed to fetch TMDB credits", tmdb_id=tmdb_id, error=str(e))
+        return {"director": None, "cast": []}
 
     async def search_movies(self, query: str, page: int = 1) -> Dict[str, Any]:
         """Search TMDB for movies by query."""

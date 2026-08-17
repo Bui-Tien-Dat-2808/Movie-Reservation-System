@@ -208,3 +208,40 @@ class TestUserSchema:
             password="StrongPass@1",
         )
         assert u.email == "user@test.com"
+
+
+class TestInferStatusFromReleaseDate:
+    """Test MovieService._infer_status_from_release_date safety and correctness."""
+
+    def test_future_iso_string(self):
+        from app.services.movie_service import MovieService
+        future_str = (date.today() + timedelta(days=30)).isoformat()
+        assert MovieService._infer_status_from_release_date(future_str) == MovieStatus.COMING_SOON
+
+    def test_past_iso_string(self):
+        from app.services.movie_service import MovieService
+        past_str = (date.today() - timedelta(days=30)).isoformat()
+        assert MovieService._infer_status_from_release_date(past_str) == MovieStatus.NOW_SHOWING
+
+    def test_future_date_object(self):
+        from app.services.movie_service import MovieService
+        future_date = date.today() + timedelta(days=30)
+        assert MovieService._infer_status_from_release_date(future_date) == MovieStatus.COMING_SOON
+
+    def test_past_date_object(self):
+        from app.services.movie_service import MovieService
+        past_date = date.today() - timedelta(days=30)
+        assert MovieService._infer_status_from_release_date(past_date) == MovieStatus.NOW_SHOWING
+
+    def test_empty_string(self):
+        from app.services.movie_service import MovieService
+        assert MovieService._infer_status_from_release_date("") == MovieStatus.NOW_SHOWING
+
+    def test_none(self):
+        from app.services.movie_service import MovieService
+        assert MovieService._infer_status_from_release_date(None) == MovieStatus.NOW_SHOWING
+
+    def test_invalid_format_string(self):
+        from app.services.movie_service import MovieService
+        assert MovieService._infer_status_from_release_date("invalid-date-format") == MovieStatus.NOW_SHOWING
+        assert MovieService._infer_status_from_release_date("2026/13/45") == MovieStatus.NOW_SHOWING

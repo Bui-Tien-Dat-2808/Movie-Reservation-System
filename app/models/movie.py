@@ -43,6 +43,8 @@ class Movie(Base):
     director: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     popularity: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.0)
     tmdb_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True, index=True)
+    trailer_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    cast_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[MovieStatus] = mapped_column(
         Enum(MovieStatus), default=MovieStatus.NOW_SHOWING, nullable=False
     )
@@ -58,6 +60,16 @@ class Movie(Base):
     showtimes: Mapped[List["Showtime"]] = relationship(  # noqa: F821
         "Showtime", back_populates="movie"
     )
+
+    @property
+    def cast(self) -> Optional[List[dict]]:
+        if self.cast_json:
+            try:
+                import json
+                return json.loads(self.cast_json)
+            except Exception:
+                return None
+        return None
 
     @property
     def genres(self) -> List["Genre"]:  # noqa: F821

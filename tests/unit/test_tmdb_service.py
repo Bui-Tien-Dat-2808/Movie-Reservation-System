@@ -155,3 +155,85 @@ async def test_get_upcoming_movies():
 
     assert len(data["results"]) == 1
     assert data["results"][0]["tmdb_id"] == 201
+
+
+class TestTMDBTrailerSelection:
+    """Test TMDBService._select_best_trailer logic."""
+
+    def test_official_youtube_trailer_selected(self):
+        service = TMDBService()
+        videos = [
+            {"site": "YouTube", "key": "teaser1", "type": "Teaser", "official": False},
+            {"site": "YouTube", "key": "official_trailer", "type": "Trailer", "official": True, "iso_639_1": "en"},
+            {"site": "YouTube", "key": "trailer2", "type": "Trailer", "official": False},
+        ]
+        assert service._select_best_trailer(videos) == "https://www.youtube.com/embed/official_trailer"
+
+    def test_unofficial_trailer_selected_over_teaser(self):
+        service = TMDBService()
+        videos = [
+            {"site": "YouTube", "key": "teaser1", "type": "Teaser", "official": True},
+            {"site": "YouTube", "key": "unofficial_trailer", "type": "Trailer", "official": False},
+        ]
+        assert service._select_best_trailer(videos) == "https://www.youtube.com/embed/unofficial_trailer"
+
+    def test_teaser_selected_when_no_trailer(self):
+        service = TMDBService()
+        videos = [
+            {"site": "YouTube", "key": "clip1", "type": "Clip", "official": False},
+            {"site": "YouTube", "key": "teaser_key", "type": "Teaser", "official": True},
+        ]
+        assert service._select_best_trailer(videos) == "https://www.youtube.com/embed/teaser_key"
+
+    def test_non_youtube_video_ignored(self):
+        service = TMDBService()
+        videos = [
+            {"site": "Vimeo", "key": "vimeo123", "type": "Trailer", "official": True},
+        ]
+        assert service._select_best_trailer(videos) is None
+
+    def test_missing_key_ignored(self):
+        service = TMDBService()
+        videos = [
+            {"site": "YouTube", "key": "", "type": "Trailer", "official": True},
+            {"site": "YouTube", "key": None, "type": "Trailer", "official": True},
+        ]
+        assert service._select_best_trailer(videos) is None
+
+
+@pytest.mark.asyncio
+async def test_get_movie_detail_skips_tmdb_when_data_exists_in_db():
+    """Test get_movie API endpoint skips calling TMDB when director, cast, and trailer exist in DB."""
+    from datetime import datetime, timezone
+    from app.models.movie import Movie, MovieStatus
+    from app.api.v1.movies import get_movie
+
+    mock_service = MagicMock()
+    mock_db = MagicMock()
+
+    existing_movie = Movie(
+        id=10,
+        title="Existing Movie",
+        director="Christopher Nolan",
+        trailer_url="https://www.youtube.com/embed/existing_key",
+        cast_json='[{"name": "Actor A"}]',
+        tmdb_id=500,
+        status=MovieStatus.NOW_SHOWING,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        is_active=True,
+    )
+
+    async def mock_get(movie_id):
+        return existing_movie
+
+    mock_service.get_movie = mock_get
+
+    with patch("app.api.v1.movies.TMDBService") as mock_tmdb_cls:
+        res = await get_movie(movie_id=10, service=mock_service, db=mock_db)
+        # Verify TMDBService was NOT instantiated since all fields were present
+        mock_tmdb_cls.assert_not_called()
+        assert res.director == "Christopher Nolan"
+        assert res.trailer_url == "https://www.youtube.com/embed/existing_key"
+        cast_name = res.cast[0].name if hasattr(res.cast[0], "name") else res.cast[0]["name"]
+        assert cast_name == "Actor A"

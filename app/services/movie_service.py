@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -31,13 +32,19 @@ class MovieService:
     def _infer_status_from_release_date(release_date):
         from datetime import date
 
+        if isinstance(release_date, str):
+            try:
+                release_date = date.fromisoformat(release_date)
+            except (ValueError, TypeError):
+                release_date = None
+
         if release_date and release_date > date.today():
             return MovieStatus.COMING_SOON
         return MovieStatus.NOW_SHOWING
 
     async def auto_update_movie_statuses(self) -> int:
         """
-        Efficiently update movie statuses using set operations (4 SQL queries total).
+        Update movie statuses based on release date and showtimes.
         Returns the number of movie status changes.
         """
         from datetime import date, datetime, timedelta, timezone
@@ -96,6 +103,9 @@ class MovieService:
         """List movies with filtering and pagination (Redis cached)."""
         from datetime import date, datetime, timezone
 
+        # Always auto update movie statuses before checking cache
+        await self.auto_update_movie_statuses()
+
         status_str = status.value if status else "all"
         cache_key = f"{CACHE_KEY_MOVIES}:{status_str}:{genre_id or 0}:{search or ''}:{pagination.page}:{pagination.page_size}"
 
@@ -119,6 +129,8 @@ class MovieService:
                     status=MovieStatus(item["status"]) if item.get("status") else MovieStatus.NOW_SHOWING,
                     rating=item.get("rating"),
                     director=item.get("director"),
+                    trailer_url=item.get("trailer_url"),
+                    cast_json=json.dumps(item["cast"], ensure_ascii=False) if item.get("cast") else None,
                     is_active=item.get("is_active", True),
                     created_at=datetime.fromisoformat(item["created_at"]) if item.get("created_at") else now_now,
                     updated_at=datetime.fromisoformat(item["updated_at"]) if item.get("updated_at") else now_now,
@@ -179,6 +191,8 @@ class MovieService:
                     "status": m.status.value,
                     "rating": m.rating,
                     "director": m.director,
+                    "trailer_url": getattr(m, "trailer_url", None),
+                    "cast": json.loads(m.cast_json) if getattr(m, "cast_json", None) else None,
                     "is_active": m.is_active,
                     "created_at": m.created_at.isoformat() if getattr(m, "created_at", None) else now_utc.isoformat(),
                     "updated_at": m.updated_at.isoformat() if getattr(m, "updated_at", None) else now_utc.isoformat(),
@@ -295,14 +309,27 @@ class MovieService:
 
     async def sync_from_tmdb(self, tmdb_id: int, tmdb_data: Optional[Dict[str, Any]] = None) -> Movie:
         """Sync movie from TMDB API (supports pre-fetched tmdb_data)."""
+        from datetime import date
+
         tmdb_service = TMDBService()
         if not tmdb_data:
             tmdb_data = await tmdb_service.get_movie(tmdb_id)
 
+        raw_release_date = tmdb_data.get("release_date")
+        parsed_release_date = None
+        if raw_release_date:
+            if isinstance(raw_release_date, date):
+                parsed_release_date = raw_release_date
+            elif isinstance(raw_release_date, str):
+                try:
+                    parsed_release_date = date.fromisoformat(raw_release_date)
+                except (ValueError, TypeError):
+                    logger.warning("TMDB release date invalid, skipping", tmdb_id=tmdb_id, raw_value=raw_release_date)
+
         # Check if already exists
         result = await self.db.execute(select(Movie).where(Movie.tmdb_id == tmdb_id))
         movie = result.scalar_one_or_none()
-        inferred_status = self._infer_status_from_release_date(tmdb_data.get("release_date"))
+        inferred_status = self._infer_status_from_release_date(parsed_release_date)
 
         # Fallback poster lookup if primary TMDB poster_url is empty
         poster_url = tmdb_data.get("poster_url")
@@ -316,17 +343,27 @@ class MovieService:
             except Exception as e:
                 logger.warning("Poster fallback search failed", title=tmdb_data["title"], error=str(e))
 
+        # Fetch Trailer & Credits from TMDB
+        trailer = await tmdb_service.get_movie_trailer_url(tmdb_id)
+        credits = await tmdb_service.get_movie_credits(tmdb_id)
+
         if movie:
             # Update existing
             movie.title = tmdb_data["title"]
             movie.description = tmdb_data.get("overview")
             movie.poster_url = poster_url or movie.poster_url
             movie.duration_minutes = tmdb_data.get("runtime")
-            movie.release_date = tmdb_data.get("release_date")
+            movie.release_date = parsed_release_date
             movie.language = tmdb_data.get("original_language")
             if tmdb_data.get("popularity") is not None:
                 movie.popularity = tmdb_data.get("popularity")
             movie.status = inferred_status
+            if trailer:
+                movie.trailer_url = trailer
+            if credits.get("director"):
+                movie.director = credits["director"]
+            if credits.get("cast"):
+                movie.cast_json = json.dumps(credits["cast"], ensure_ascii=False)
         else:
             # Create new
             movie = Movie(
@@ -334,8 +371,11 @@ class MovieService:
                 description=tmdb_data.get("overview"),
                 poster_url=poster_url,
                 duration_minutes=tmdb_data.get("runtime"),
-                release_date=tmdb_data.get("release_date"),
+                release_date=parsed_release_date,
                 language=tmdb_data.get("original_language"),
+                director=credits.get("director"),
+                trailer_url=trailer,
+                cast_json=json.dumps(credits["cast"], ensure_ascii=False) if credits.get("cast") else None,
                 popularity=tmdb_data.get("popularity") or 0.0,
                 tmdb_id=tmdb_id,
                 status=inferred_status,
