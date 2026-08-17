@@ -125,6 +125,67 @@ class TMDBService:
         clean_key = best["key"].strip()
         return f"https://www.youtube.com/embed/{clean_key}"
 
+    def _normalize_rating(self, cert: str) -> str:
+        """Normalize raw certification string into standard Vietnamese rating system (P, K, T13, T16, T18)."""
+        c = cert.upper().strip().replace(" ", "").replace("-", "")
+        if c in ("P", "ALL", "G", "0", "0+"):
+            return "P"
+        if c in ("K", "PG", "7", "6", "6+", "7+", "9"):
+            return "K"
+        if c in ("T13", "13", "13+", "PG13", "12", "12+", "14"):
+            return "T13"
+        if c in ("T16", "16", "16+", "NC16", "15", "15+", "15A", "M", "MA15+"):
+            return "T16"
+        if c in ("T18", "18", "18+", "C18", "R", "NC17", "18A", "X"):
+            return "T18"
+        return cert.strip()
+
+    def _extract_rating(self, region_results: List[Dict[str, Any]]) -> Optional[str]:
+        """Extract content certification / age rating from TMDB release_dates."""
+        if not region_results or not isinstance(region_results, list):
+            return None
+
+        raw_cert = ""
+
+        # 1. Try target region first (e.g., VN)
+        vn_region = next((r for r in region_results if isinstance(r, dict) and r.get("iso_3166_1") == self.region), None)
+        if vn_region and isinstance(vn_region.get("release_dates"), list):
+            for rd in vn_region["release_dates"]:
+                if isinstance(rd, dict) and rd.get("certification"):
+                    c = str(rd["certification"]).strip()
+                    if c:
+                        raw_cert = c
+                        break
+
+        # 2. Fallback to US region
+        if not raw_cert:
+            us_region = next((r for r in region_results if isinstance(r, dict) and r.get("iso_3166_1") == "US"), None)
+            if us_region and isinstance(us_region.get("release_dates"), list):
+                for rd in us_region["release_dates"]:
+                    if isinstance(rd, dict) and rd.get("certification"):
+                        c = str(rd["certification"]).strip()
+                        if c:
+                            raw_cert = c
+                            break
+
+        # 3. Fallback to any region with a certification
+        if not raw_cert:
+            for r in region_results:
+                if isinstance(r, dict) and isinstance(r.get("release_dates"), list):
+                    for rd in r["release_dates"]:
+                        if isinstance(rd, dict) and rd.get("certification"):
+                            c = str(rd["certification"]).strip()
+                            if c:
+                                raw_cert = c
+                                break
+                if raw_cert:
+                    break
+
+        if not raw_cert:
+            return None
+
+        return self._normalize_rating(raw_cert)
+
     async def get_movie(self, tmdb_id: int) -> Dict[str, Any]:
         """Fetch movie data from TMDB API with localized region release date, videos, and credits in a single request."""
         headers, params = self._get_auth_headers_and_params({
@@ -154,9 +215,10 @@ class TMDBService:
             logger.warning("TMDB API request failed", tmdb_id=tmdb_id, error=str(e))
             raise
 
-        # 1. Parse release_date: Try region-specific release date first (e.g. VN)
+        # 1. Parse release_date & age rating: Try region-specific release date & certification
         release_date = None
         region_results = data.get("release_dates", {}).get("results", [])
+        rating = self._extract_rating(region_results)
         matched_region = next((r for r in region_results if r.get("iso_3166_1") == self.region), None)
 
         if matched_region and matched_region.get("release_dates"):
@@ -180,9 +242,12 @@ class TMDBService:
         # 3. Extract genres
         genre_names = [g["name"] for g in data.get("genres", []) if isinstance(g, dict) and "name" in g]
 
-        # 4. Extract trailer URL from videos
+        # 4. Extract trailer URL from videos (vi-VN first, fallback to en-US results)
         videos_list = data.get("videos", {}).get("results", [])
-        trailer_url = self._select_best_trailer(videos_list)
+        # vi-VN results: filter by language, en-US results: the rest
+        vi_videos = [v for v in videos_list if isinstance(v, dict) and v.get("iso_639_1") == "vi"]
+        en_videos = [v for v in videos_list if isinstance(v, dict) and v.get("iso_639_1") == "en"]
+        trailer_url = self._select_best_trailer(vi_videos) or self._select_best_trailer(en_videos) or self._select_best_trailer(videos_list)
 
         # 5. Extract credits (director & top cast)
         credits_data = data.get("credits", {})
@@ -213,6 +278,7 @@ class TMDBService:
             "trailer_url": trailer_url,
             "director": director_name,
             "cast": cast_list,
+            "rating": rating,
         }
 
     async def get_movie_trailer_url(self, tmdb_id: int) -> Optional[str]:

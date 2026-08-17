@@ -343,9 +343,11 @@ class MovieService:
             except Exception as e:
                 logger.warning("Poster fallback search failed", title=tmdb_data["title"], error=str(e))
 
-        # Fetch Trailer & Credits from TMDB
-        trailer = await tmdb_service.get_movie_trailer_url(tmdb_id)
-        credits = await tmdb_service.get_movie_credits(tmdb_id)
+        # Use trailer/director/cast/rating already embedded in tmdb_data (from append_to_response=release_dates,videos,credits)
+        trailer = tmdb_data.get("trailer_url")
+        director = tmdb_data.get("director")
+        cast = tmdb_data.get("cast") or []
+        rating = tmdb_data.get("rating")
 
         if movie:
             # Update existing
@@ -360,10 +362,12 @@ class MovieService:
             movie.status = inferred_status
             if trailer:
                 movie.trailer_url = trailer
-            if credits.get("director"):
-                movie.director = credits["director"]
-            if credits.get("cast"):
-                movie.cast_json = json.dumps(credits["cast"], ensure_ascii=False)
+            if director:
+                movie.director = director
+            if cast:
+                movie.cast_json = json.dumps(cast, ensure_ascii=False)
+            if rating:
+                movie.rating = rating
         else:
             # Create new
             movie = Movie(
@@ -373,9 +377,10 @@ class MovieService:
                 duration_minutes=tmdb_data.get("runtime"),
                 release_date=parsed_release_date,
                 language=tmdb_data.get("original_language"),
-                director=credits.get("director"),
+                rating=rating,
+                director=director,
                 trailer_url=trailer,
-                cast_json=json.dumps(credits["cast"], ensure_ascii=False) if credits.get("cast") else None,
+                cast_json=json.dumps(cast, ensure_ascii=False) if cast else None,
                 popularity=tmdb_data.get("popularity") or 0.0,
                 tmdb_id=tmdb_id,
                 status=inferred_status,

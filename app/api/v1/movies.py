@@ -123,8 +123,9 @@ async def get_movie(
     need_director = not movie.director or movie.director.strip() in ("", "Đang cập nhật", "N/A")
     need_cast = not cast_data
     need_trailer = movie.trailer_url is None
+    need_rating = not movie.rating
 
-    if movie.tmdb_id and (need_director or need_cast or need_trailer):
+    if movie.tmdb_id and (need_director or need_cast or need_trailer or need_rating):
         try:
             tmdb_service = TMDBService()
             # Calling get_movie fetches release_dates, videos, and credits in ONE single request!
@@ -142,6 +143,10 @@ async def get_movie(
 
             if need_trailer and tmdb_data.get("trailer_url"):
                 movie.trailer_url = tmdb_data["trailer_url"]
+                need_commit = True
+
+            if need_rating and tmdb_data.get("rating"):
+                movie.rating = tmdb_data["rating"]
                 need_commit = True
 
             if need_commit:

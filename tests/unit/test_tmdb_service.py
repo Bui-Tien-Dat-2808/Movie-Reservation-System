@@ -217,6 +217,7 @@ async def test_get_movie_detail_skips_tmdb_when_data_exists_in_db():
         director="Christopher Nolan",
         trailer_url="https://www.youtube.com/embed/existing_key",
         cast_json='[{"name": "Actor A"}]',
+        rating="PG-13",
         tmdb_id=500,
         status=MovieStatus.NOW_SHOWING,
         created_at=datetime.now(timezone.utc),
