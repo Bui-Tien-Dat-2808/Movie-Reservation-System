@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     BACKEND_BASE_URL: str = "http://localhost:8000"
 
     # VNPay Configuration
-    VNPAY_TMN_CODE: str = "S6967RVA"
-    VNPAY_HASH_SECRET: str = "NTDXCYCSAOPNANKALKQZICSVHTRLIKUX"
+    VNPAY_TMN_CODE: str = ""           # Required: set via .env (e.g. VNPAY_TMN_CODE=XXXXXXXX)
+    VNPAY_HASH_SECRET: str = ""        # Required: set via .env (e.g. VNPAY_HASH_SECRET=...)
     VNPAY_URL: str = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
     VNPAY_RETURN_URL: str = ""
 

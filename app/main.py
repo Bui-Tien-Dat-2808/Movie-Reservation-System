@@ -37,6 +37,34 @@ async def periodic_reservation_cleanup():
             logger.error("periodic_reservation_cleanup_error", error=str(e))
 
 
+async def periodic_movie_sync():
+    """
+    Background task running periodically to:
+    1. Update movie statuses (coming_soon -> now_showing -> ended).
+    2. Auto sync upcoming movies from TMDB to keep 'Phim sắp chiếu' fresh.
+    """
+    await asyncio.sleep(30)
+    while True:
+        try:
+            logger.info("Starting background periodic TMDB sync & movie status update...")
+            from app.db.session import AsyncSessionLocal
+            from app.services.movie_service import MovieService
+            from app.services.cache_service import CacheService
+
+            async with AsyncSessionLocal() as db:
+                service = MovieService(db, CacheService(None))
+                result = await service.perform_auto_tmdb_sync(limit=12)
+                logger.info("Periodic movie sync completed", result=result)
+
+            # Repeat every 12 hours (43200 seconds)
+            await asyncio.sleep(43200)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("periodic_movie_sync_error", error=str(e))
+            await asyncio.sleep(300)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -46,13 +74,15 @@ async def lifespan(app: FastAPI):
     # Initialize database (create tables + seed admin)
     await init_db()
 
-    # Start periodic background cleanup task
+    # Start periodic background tasks
     cleanup_task = asyncio.create_task(periodic_reservation_cleanup())
+    movie_sync_task = asyncio.create_task(periodic_movie_sync())
 
     yield
 
-    # Cancel background task & cleanup on shutdown
+    # Cancel background tasks & cleanup on shutdown
     cleanup_task.cancel()
+    movie_sync_task.cancel()
     await engine.dispose()
     logger.info("Application shutdown complete")
 

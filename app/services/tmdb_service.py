@@ -52,6 +52,7 @@ class TMDBService:
         return httpx.AsyncClient(
             headers=headers,
             http2=False,
+            verify=True,  # SSL verification enabled — required for secure TMDB API communication
             timeout=15.0,
         )
 
@@ -191,6 +192,7 @@ class TMDBService:
         headers, params = self._get_auth_headers_and_params({
             "language": self.language,
             "append_to_response": "release_dates,videos,credits",
+            "include_video_language": "vi,en,null",
         })
 
         try:

@@ -1,14 +1,13 @@
-from datetime import date
+import json
 from typing import List, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_active_user, get_db, get_redis, require_admin
 from app.models.movie import Movie, MovieStatus
-from app.models.showtime import Showtime
 from app.schemas.common import PaginatedResponse
 from app.schemas.movie import MovieCreate, MovieResponse, MovieUpdate
 from app.services.cache_service import CacheService
@@ -94,10 +93,6 @@ async def list_movies(
     return paginate(movies, total, pagination.page, pagination.page_size)
 
 
-from urllib.parse import quote_plus
-import json
-
-
 @router.get(
     "/{movie_id}",
     response_model=MovieResponse,
@@ -106,12 +101,11 @@ import json
 async def get_movie(
     movie_id: int,
     service: MovieService = Depends(get_movie_service),
-    db: AsyncSession = Depends(get_db),
 ):
     """Public: Get detailed information about a movie by ID (supports local ID or TMDB ID)."""
     movie = await service.get_movie(movie_id)
 
-    # 1. Parse cast from DB column if available
+    # Parse cast from DB column
     cast_data = None
     if getattr(movie, "cast_json", None):
         try:
@@ -119,44 +113,9 @@ async def get_movie(
         except Exception:
             cast_data = None
 
-    # 2. Only call TMDB if database is actually missing critical data!
-    need_director = not movie.director or movie.director.strip() in ("", "Đang cập nhật", "N/A")
-    need_cast = not cast_data
-    need_trailer = movie.trailer_url is None
-    need_rating = not movie.rating
-
-    if movie.tmdb_id and (need_director or need_cast or need_trailer or need_rating):
-        try:
-            tmdb_service = TMDBService()
-            # Calling get_movie fetches release_dates, videos, and credits in ONE single request!
-            tmdb_data = await tmdb_service.get_movie(movie.tmdb_id)
-            need_commit = False
-
-            if need_director and tmdb_data.get("director"):
-                movie.director = tmdb_data["director"]
-                need_commit = True
-
-            if need_cast and tmdb_data.get("cast"):
-                cast_data = tmdb_data["cast"]
-                movie.cast_json = json.dumps(cast_data, ensure_ascii=False)
-                need_commit = True
-
-            if need_trailer and tmdb_data.get("trailer_url"):
-                movie.trailer_url = tmdb_data["trailer_url"]
-                need_commit = True
-
-            if need_rating and tmdb_data.get("rating"):
-                movie.rating = tmdb_data["rating"]
-                need_commit = True
-
-            if need_commit:
-                await db.commit()
-                await db.refresh(movie)
-        except Exception as e:
-            logger.warning("Failed to resolve TMDB details for movie", movie_id=movie_id, error=str(e))
-
-    # 3. Clean fallbacks (NO YouTube search URL fallback)
+    # Build response with display fallbacks (no TMDB call here — service handles enrichment)
     trailer_url = getattr(movie, "trailer_url", None)
+
     director = movie.director
     if not director or director.strip() in ("", "Đang cập nhật", "N/A"):
         director = "Đang cập nhật"
@@ -258,7 +217,7 @@ async def auto_sync_tmdb(
     """
     Admin: Automatically fetch and import currently showing AND coming soon movies from TMDB API.
     - Dynamically scans N pages from TMDB until limit N items are retrieved.
-    - Determines NOW_SHOWING vs COMING_SOON based on active showtimes and release date (<= today = NOW_SHOWING, > today = COMING_SOON).
+    - Determines NOW_SHOWING vs COMING_SOON based on active showtimes and release date.
     - Detailed error tracking per item.
     """
     import math
@@ -271,23 +230,9 @@ async def auto_sync_tmdb(
 
     pages_needed = max(1, math.ceil(limit / 20))
 
-    now_playing_list = []
-    upcoming_list = []
-    failed_items = []
-
-    # Catch network/connection errors specifically
+    # Delegate all sync logic to service layer; only handle HTTP-level errors here
     try:
-        for p in range(1, pages_needed + 1):
-            np_res = await tmdb.get_now_playing_movies(page=p)
-            now_playing_list.extend(np_res.get("results", []))
-            if p > np_res.get("total_pages", 1):
-                break
-
-        for p in range(1, pages_needed + 2):
-            up_res = await tmdb.get_upcoming_movies(page=p)
-            upcoming_list.extend(up_res.get("results", []))
-            if p > up_res.get("total_pages", 1):
-                break
+        return await service.perform_auto_tmdb_sync(limit=limit, pages_needed=pages_needed)
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
         logger.error("TMDB API HTTP error during auto-sync", status_code=status_code, response=e.response.text)
@@ -303,131 +248,6 @@ async def auto_sync_tmdb(
             "Không thể kết nối đến máy chủ TMDB API (Lỗi kết nối mạng). Vui lòng kiểm tra lại đường truyền mạng hoặc thử lại sau ít phút."
         )
 
-    # Fetch movie IDs with active showtimes
-    st_res = await service.db.execute(select(Showtime.movie_id).distinct())
-    showtime_movie_ids = set(st_res.scalars().all())
-
-    today = date.today()
-
-    added_new_count = 0
-    updated_existing_count = 0
-
-    # Extract target items up to limit
-    target_now_playing = now_playing_list[:limit]
-    target_upcoming = upcoming_list[:limit]
-
-    # Collect all unique TMDB IDs needed
-    all_tmdb_ids = list({item["tmdb_id"] for item in (target_now_playing + target_upcoming)})
-
-    # Pre-fetch all movie details from TMDB API concurrently in parallel (max 8 concurrent connections)
-    import asyncio
-    semaphore = asyncio.Semaphore(8)
-    prefetched_data = {}
-    fetch_errors = {}
-
-    async def fetch_detail(tmdb_id: int):
-        async with semaphore:
-            try:
-                detail = await tmdb.get_movie(tmdb_id)
-                prefetched_data[tmdb_id] = detail
-            except Exception as e:
-                fetch_errors[tmdb_id] = str(e)
-
-    if all_tmdb_ids:
-        await asyncio.gather(*(fetch_detail(tid) for tid in all_tmdb_ids))
-
-    # 1. Sync Now Playing
-    for item in target_now_playing:
-        tmdb_id = item["tmdb_id"]
-        if tmdb_id in fetch_errors:
-            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": fetch_errors[tmdb_id]})
-            continue
-
-        try:
-            existing_res = await service.db.execute(
-                select(Movie).where(Movie.tmdb_id == tmdb_id)
-            )
-            ex = existing_res.scalar_one_or_none()
-            if not ex:
-                added_new_count += 1
-            else:
-                updated_existing_count += 1
-
-            movie = await service.sync_from_tmdb(tmdb_id, prefetched_data.get(tmdb_id))
-            if movie.id in showtime_movie_ids:
-                movie.status = MovieStatus.NOW_SHOWING
-            elif movie.release_date and movie.release_date > today:
-                movie.status = MovieStatus.COMING_SOON
-            else:
-                movie.status = MovieStatus.NOW_SHOWING
-        except Exception as e:
-            logger.warning("Failed to sync now_playing movie", tmdb_id=tmdb_id, error=str(e))
-            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": str(e)})
-
-    # 2. Sync Upcoming Movies
-    for item in target_upcoming:
-        tmdb_id = item["tmdb_id"]
-        if tmdb_id in fetch_errors and tmdb_id not in prefetched_data:
-            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": fetch_errors[tmdb_id]})
-            continue
-
-        try:
-            existing_res = await service.db.execute(
-                select(Movie).where(Movie.tmdb_id == tmdb_id)
-            )
-            ex_movie = existing_res.scalar_one_or_none()
-
-            if not ex_movie:
-                added_new_count += 1
-            else:
-                updated_existing_count += 1
-
-            movie = await service.sync_from_tmdb(tmdb_id, prefetched_data.get(tmdb_id))
-
-            # Upcoming movies fetched from TMDB /upcoming endpoint are COMING_SOON
-            # unless the cinema has active showtimes scheduled for them
-            if movie.id in showtime_movie_ids:
-                movie.status = MovieStatus.NOW_SHOWING
-            elif movie.release_date and movie.release_date > today:
-                movie.status = MovieStatus.COMING_SOON
-            else:
-                movie.status = MovieStatus.NOW_SHOWING
-        except Exception as e:
-            logger.warning("Failed to sync upcoming movie", tmdb_id=tmdb_id, error=str(e))
-            failed_items.append({"tmdb_id": tmdb_id, "title": item.get("title"), "reason": str(e)})
-
-    # Run general showtime-based status updates
-    await service.auto_update_movie_statuses()
-
-    await service.db.commit()
-
-    # Invalidate stale Redis movie cache so new trailers and movie details are instantly served
-    try:
-        await service.cache.delete_pattern("movies:*")
-    except Exception as e:
-        logger.warning("Failed to invalidate movie cache after auto-sync", error=str(e))
-
-    # Recalculate totals in database
-    now_res = await service.db.execute(
-        select(Movie).where((Movie.status == MovieStatus.NOW_SHOWING) & (Movie.is_active == True))
-    )
-    total_now = len(now_res.scalars().all())
-
-    coming_res = await service.db.execute(
-        select(Movie).where((Movie.status == MovieStatus.COMING_SOON) & (Movie.is_active == True))
-    )
-    total_coming = len(coming_res.scalars().all())
-
-    return {
-        "success": True,
-        "added_new_count": added_new_count,
-        "updated_existing_count": updated_existing_count,
-        "total_now_showing": total_now,
-        "total_coming_soon": total_coming,
-        "failed_items": failed_items,
-        "message": f"Đã đồng bộ tự động thành công từ TMDB API: Thêm mới {added_new_count} phim, cập nhật {updated_existing_count} phim. Hiện có {total_now} phim Đang Chiếu và {total_coming} phim Sắp Ra Mắt!",
-    }
-
 
 @router.get(
     "/tmdb/list/{list_id}",
@@ -441,3 +261,77 @@ async def get_tmdb_list(
     """Admin: Get movies from a specific TMDB list."""
     tmdb_service = TMDBService()
     return await tmdb_service.get_list_movies(list_id, page)
+
+
+@router.post(
+    "/admin/backfill-trailers",
+    summary="Admin: Backfill trailer/director/cast/rating còn thiếu từ TMDB",
+)
+async def backfill_trailers(
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+    _=Depends(require_admin),
+):
+    """Admin endpoint to safely backfill missing or corrupted trailers, directors, cast, and ratings from TMDB via ORM."""
+    movie_service = MovieService(db, CacheService(redis))
+    tmdb_service = TMDBService()
+
+    result = await db.execute(
+        select(Movie).where(
+            Movie.is_active == True,
+            or_(
+                Movie.trailer_url.is_(None),
+                ~Movie.trailer_url.like("https://www.youtube.com/embed/%"),
+                Movie.director.is_(None),
+                Movie.director.in_(["Đang cập nhật", "N/A", ""]),
+                Movie.cast_json.is_(None),
+                Movie.rating.is_(None),
+            ),
+        )
+    )
+    movies_to_fix = result.scalars().all()
+
+    updated_count = 0
+    errors = []
+
+    for movie in movies_to_fix:
+        try:
+            # 1. Search TMDB if tmdb_id is missing
+            if not movie.tmdb_id and movie.title:
+                try:
+                    search_res = await tmdb_service.search_movies(movie.title)
+                    results = search_res.get("results", [])
+                    if results:
+                        movie.tmdb_id = results[0].get("tmdb_id") or results[0].get("id")
+                except Exception as e:
+                    logger.warning("Backfill TMDB title search failed", movie_id=movie.id, title=movie.title, error=str(e))
+
+            # 2. Sync full details from TMDB if tmdb_id is available
+            if movie.tmdb_id:
+                try:
+                    await movie_service.sync_from_tmdb(movie.tmdb_id)
+                except Exception as e:
+                    logger.warning("Backfill TMDB sync failed", movie_id=movie.id, tmdb_id=movie.tmdb_id, error=str(e))
+
+            # 3. Ensure trailer_url is clean: if not a valid embed URL, set to None (avoids broken YouTube frames)
+            if movie.trailer_url and not movie.trailer_url.startswith("https://www.youtube.com/embed/"):
+                movie.trailer_url = None
+
+            updated_count += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            errors.append({"movie_id": movie.id, "title": movie.title, "error": str(e)})
+
+    await db.commit()
+    try:
+        await CacheService(redis).delete_pattern("movies:*")
+    except Exception as e:
+        logger.warning("Failed to clear movie cache after backfill", error=str(e))
+
+    return {
+        "success": True,
+        "updated": updated_count,
+        "total_checked": len(movies_to_fix),
+        "errors": errors,
+        "message": f"Đã hoàn tất bổ sung trailer, đạo diễn, diễn viên và độ tuổi cho {updated_count}/{len(movies_to_fix)} phim!",
+    }

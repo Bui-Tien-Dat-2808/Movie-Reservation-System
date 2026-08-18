@@ -64,10 +64,13 @@ class TestMovieAutoStatusTransition:
         fut_result = MagicMock()
         fut_result.scalars().all.return_value = []
 
+        all_st_result = MagicMock()
+        all_st_result.scalars().all.return_value = []
+
         movie_result = MagicMock()
         movie_result.scalars().all.return_value = [past_movie]
 
-        db_mock.execute.side_effect = [fut_result, movie_result]
+        db_mock.execute.side_effect = [fut_result, all_st_result, movie_result]
 
         await service.auto_update_movie_statuses()
 
@@ -93,10 +96,13 @@ class TestMovieAutoStatusTransition:
         fut_result = MagicMock()
         fut_result.scalars().all.return_value = []  # No future showtimes
 
+        all_st_result = MagicMock()
+        all_st_result.scalars().all.return_value = [2]  # Has past showtimes
+
         movie_result = MagicMock()
         movie_result.scalars().all.return_value = [showing_movie]
 
-        db_mock.execute.side_effect = [fut_result, movie_result]
+        db_mock.execute.side_effect = [fut_result, all_st_result, movie_result]
 
         await service.auto_update_movie_statuses()
 
@@ -122,10 +128,13 @@ class TestMovieAutoStatusTransition:
         fut_result = MagicMock()
         fut_result.scalars().all.return_value = []
 
+        all_st_result = MagicMock()
+        all_st_result.scalars().all.return_value = []
+
         movie_result = MagicMock()
         movie_result.scalars().all.return_value = [old_movie]
 
-        db_mock.execute.side_effect = [fut_result, movie_result]
+        db_mock.execute.side_effect = [fut_result, all_st_result, movie_result]
 
         await service.auto_update_movie_statuses()
 
@@ -245,3 +254,25 @@ class TestInferStatusFromReleaseDate:
         from app.services.movie_service import MovieService
         assert MovieService._infer_status_from_release_date("invalid-date-format") == MovieStatus.NOW_SHOWING
         assert MovieService._infer_status_from_release_date("2026/13/45") == MovieStatus.NOW_SHOWING
+
+
+class TestPerformAutoTmdbSync:
+    """Test MovieService.perform_auto_tmdb_sync background worker."""
+
+    @pytest.mark.asyncio
+    async def test_perform_auto_tmdb_sync_graceful_error_handling(self):
+        """Service now re-raises network errors so the API layer can translate them."""
+        from app.services.movie_service import MovieService
+        mock_db = AsyncMock()
+        mock_cache = AsyncMock()
+        service = MovieService(mock_db, mock_cache)
+
+        with patch("app.services.movie_service.TMDBService") as mock_tmdb_cls:
+            mock_tmdb_inst = MagicMock()
+            mock_tmdb_inst.get_now_playing_movies = AsyncMock(side_effect=Exception("API connection error"))
+            mock_tmdb_cls.return_value = mock_tmdb_inst
+
+            # After refactor, errors bubble up so the API endpoint can translate them
+            # to user-friendly Vietnamese messages
+            with pytest.raises(Exception, match="API connection error"):
+                await service.perform_auto_tmdb_sync(limit=10)

@@ -231,7 +231,7 @@ async def test_get_movie_detail_skips_tmdb_when_data_exists_in_db():
     mock_service.get_movie = mock_get
 
     with patch("app.api.v1.movies.TMDBService") as mock_tmdb_cls:
-        res = await get_movie(movie_id=10, service=mock_service, db=mock_db)
+        res = await get_movie(movie_id=10, service=mock_service)
         # Verify TMDBService was NOT instantiated since all fields were present
         mock_tmdb_cls.assert_not_called()
         assert res.director == "Christopher Nolan"
