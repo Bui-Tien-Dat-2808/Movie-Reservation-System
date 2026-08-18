@@ -672,13 +672,13 @@ class ShowtimeService:
         self,
         showtimes_data: list,
         replace_existing: bool = True,
-    ) -> int:
+    ) -> tuple[int, list[dict]]:
         """Bulk insert approved auto-scheduled showtimes into DB."""
         from app.models.room import Room
         from app.models.showtime_seat import ShowtimeSeat, SeatStatus
 
         if not showtimes_data:
-            return 0
+            return 0, []
 
         if replace_existing and showtimes_data:
             all_starts = [ensure_utc(item.start_time) for item in showtimes_data]
@@ -716,7 +716,25 @@ class ShowtimeService:
         }
 
         count = 0
+        skipped = []
         for item in showtimes_data:
+            active_seats = room_seats_map.get(item.room_id, [])
+            if not active_seats:
+                room_name = getattr(item, "room_name", f"Phòng {item.room_id}")
+                start_str = (
+                    item.start_time.isoformat()
+                    if hasattr(item.start_time, "isoformat")
+                    else str(item.start_time)
+                )
+                skipped.append({
+                    "room_id": item.room_id,
+                    "room_name": room_name,
+                    "movie_title": getattr(item, "movie_title", ""),
+                    "start_time": start_str,
+                    "reason": "Phòng không có ghế đang hoạt động (active) nào.",
+                })
+                continue
+
             st = Showtime(
                 movie_id=item.movie_id,
                 room_id=item.room_id,
@@ -729,20 +747,18 @@ class ShowtimeService:
             self.db.add(st)
             await self.db.flush()
 
-            active_seats = room_seats_map.get(item.room_id, [])
-            if active_seats:
-                showtime_seats = [
-                    ShowtimeSeat(
-                        showtime_id=st.id,
-                        seat_id=seat.id,
-                        status=SeatStatus.AVAILABLE,
-                    )
-                    for seat in active_seats
-                ]
-                self.db.add_all(showtime_seats)
+            showtime_seats = [
+                ShowtimeSeat(
+                    showtime_id=st.id,
+                    seat_id=seat.id,
+                    status=SeatStatus.AVAILABLE,
+                )
+                for seat in active_seats
+            ]
+            self.db.add_all(showtime_seats)
             count += 1
 
         await self.db.commit()
         await self.cache.delete_pattern("showtimes:*")
-        logger.info("Auto-scheduled showtimes committed", total=count)
-        return count
+        logger.info("Auto-scheduled showtimes committed", total=count, skipped=len(skipped))
+        return count, skipped

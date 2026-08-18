@@ -155,11 +155,20 @@ async def confirm_auto_schedule(
     _=Depends(require_admin),
 ):
     """Admin: Bulk insert approved proposed showtimes into DB."""
-    count = await service.confirm_auto_schedule(
+    count, skipped = await service.confirm_auto_schedule(
         data.showtimes,
         replace_existing=data.replace_existing,
     )
-    return {"message": f"Successfully created {count} showtimes", "count": count}
+    message = (
+        f"Successfully created {count} showtimes"
+        if not skipped
+        else f"Created {count} showtimes, skipped {len(skipped)} due to inactive/empty room seats"
+    )
+    return {
+        "message": message,
+        "count": count,
+        "skipped": skipped,
+    }
 
 
 @router.post(

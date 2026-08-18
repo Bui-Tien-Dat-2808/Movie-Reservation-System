@@ -369,3 +369,63 @@ async def test_b4_eager_loaded_room_capacity_sorting(mock_db, mock_cache):
     assert len(proposed) > 0
     # Large room (room_id=2) must be scheduled first
     assert proposed[0].room_id == 2
+
+
+@pytest.mark.asyncio
+async def test_confirm_auto_schedule_skips_rooms_with_zero_active_seats():
+    """Verify confirm_auto_schedule skips creating showtime when room has 0 active seats."""
+    from datetime import datetime, timezone
+    from app.services.showtime_service import ShowtimeService
+    from app.models.room import Room, RoomType
+    from app.schemas.showtime import ProposedShowtimeItem
+
+    mock_db = AsyncMock()
+    mock_db.add = MagicMock()
+    mock_db.add_all = MagicMock()
+    mock_cache = AsyncMock()
+    service = ShowtimeService(mock_db, mock_cache)
+
+    room_with_seats = Room(id=1, name="Active Room", room_type=RoomType.STANDARD, is_active=True)
+    seat = MagicMock()
+    seat.id = 101
+    seat.is_active = True
+    room_with_seats.seats = [seat]
+
+    room_empty = Room(id=2, name="Empty Room", room_type=RoomType.STANDARD, is_active=True)
+    room_empty.seats = []  # No seats
+
+    mock_db.execute.side_effect = [
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [])),  # clean_stmt (old showtimes)
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [room_with_seats, room_empty])),  # rooms_res
+    ]
+
+    now = datetime.now(timezone.utc)
+    item_valid = ProposedShowtimeItem(
+        movie_id=1,
+        movie_title="Valid Movie",
+        room_id=1,
+        room_name="Active Room",
+        start_time=now,
+        end_time=now + timedelta(hours=2),
+        base_price=Decimal("90000"),
+        vip_price=Decimal("120000"),
+    )
+    item_empty_room = ProposedShowtimeItem(
+        movie_id=2,
+        movie_title="Empty Room Movie",
+        room_id=2,
+        room_name="Empty Room",
+        start_time=now,
+        end_time=now + timedelta(hours=2),
+        base_price=Decimal("90000"),
+        vip_price=Decimal("120000"),
+    )
+
+    count, skipped = await service.confirm_auto_schedule([item_valid, item_empty_room], replace_existing=True)
+
+    assert count == 1
+    assert len(skipped) == 1
+    assert skipped[0]["room_id"] == 2
+    assert skipped[0]["room_name"] == "Empty Room"
+    assert "Phòng không có ghế đang hoạt động" in skipped[0]["reason"]
+
