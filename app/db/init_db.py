@@ -143,7 +143,22 @@ async def _seed_tmdb_movies() -> None:
             logger.info("Database already contains movies, skipping TMDB seeding")
             return
 
-        logger.info("Database has no movies. Fetching popular movies from TMDB API to seed...")
+        # SAFETY GUARDRAIL: If reservations already exist (not brand new database),
+        # treat this as a potentially wrong/lost DB connection and DO NOT auto-seed dummy movies.
+        from app.models.reservation import Reservation
+        reservation_check = await db.execute(select(Reservation).limit(1))
+        if reservation_check.scalars().first():
+            logger.error(
+                "⚠️ Bảng movies trống NHƯNG đã phát hiện dữ liệu reservation — "
+                "đây rất có thể là dấu hiệu kết nối SAI database hoặc dữ liệu bị mất, "
+                "KHÔNG tự động seed phim mẫu để tránh che giấu sự cố. "
+                "Vui lòng kiểm tra thủ công DATABASE_URL và tình trạng volume trước khi tiếp tục."
+            )
+            return
+
+        logger.warning(
+            "Database có vẻ hoàn toàn mới (không có cả reservation) — tiến hành seed phim mẫu từ TMDB."
+        )
         try:
             tmdb = TMDBService()
             # Mock or initialize a simple cache service without actual redis client for safety during initialization

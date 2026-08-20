@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    @property
+    def effective_redis_url(self) -> str:
+        url = self.REDIS_URL
+        if "redis:6379" in url:
+            import socket
+            try:
+                socket.gethostbyname("redis")
+            except socket.gaierror:
+                return url.replace("redis:6379", "localhost:6379")
+        return url
+
     # JWT
     SECRET_KEY: str
     ALGORITHM: str = "HS256"

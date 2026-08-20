@@ -42,7 +42,7 @@ async def get_redis() -> aioredis.Redis:
     global _redis_client
     if _redis_client is None:
         _redis_client = aioredis.from_url(
-            settings.REDIS_URL,
+            settings.effective_redis_url,
             encoding="utf-8",
             decode_responses=True,
         )

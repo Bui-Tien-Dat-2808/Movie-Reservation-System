@@ -13,16 +13,20 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'add_must_change_pwd'
-down_revision: Union[str, None] = 'add_refund_transactions_table'
+down_revision: Union[str, None] = 'add_exchanged_from_res_id'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        'users',
-        sa.Column('must_change_password', sa.Boolean(), server_default='false', nullable=False)
-    )
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    columns = [c['name'] for c in inspector.get_columns('users')]
+    if 'must_change_password' not in columns:
+        op.add_column(
+            'users',
+            sa.Column('must_change_password', sa.Boolean(), server_default='false', nullable=False)
+        )
 
 
 def downgrade() -> None:

@@ -53,8 +53,8 @@ async def periodic_movie_sync():
 
             async with AsyncSessionLocal() as db:
                 service = MovieService(db, CacheService(None))
-                result = await service.perform_auto_tmdb_sync(limit=12)
-                logger.info("Periodic movie sync completed", result=result)
+                result = await service.update_movie_statuses()
+                logger.info("Periodic movie status update completed", changes=result)
 
             # Repeat every 12 hours (43200 seconds)
             await asyncio.sleep(43200)
@@ -124,6 +124,7 @@ Authorization: Bearer <access_token>
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins_list,
+        allow_origin_regex=r"https?://.*",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

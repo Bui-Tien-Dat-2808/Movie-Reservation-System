@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = 'add_exchanged_from_reservation_id'
+revision = 'add_exchanged_from_res_id'
 down_revision = 'add_refund_transactions_table'
 branch_labels = None
 depends_on = None

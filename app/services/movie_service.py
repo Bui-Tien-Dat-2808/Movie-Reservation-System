@@ -80,15 +80,10 @@ class MovieService:
 
             if m.release_date and m.release_date > today:
                 m.status = MovieStatus.COMING_SOON
-            elif not has_future_st and (has_any_st or (m.release_date and m.release_date < cutoff_date)):
-                # Has no future showtimes AND (already had showtimes in past OR release date > 14 days ago)
+            elif m.status == MovieStatus.ENDED:
                 m.status = MovieStatus.ENDED
-            elif m.release_date:
-                m.status = MovieStatus.NOW_SHOWING
-            elif has_future_st:
-                m.status = MovieStatus.NOW_SHOWING
             else:
-                m.status = MovieStatus.ENDED
+                m.status = MovieStatus.NOW_SHOWING
 
             if m.status != old_status:
                 changes += 1
