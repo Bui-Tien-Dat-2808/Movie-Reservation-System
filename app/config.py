@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     CACHE_TTL_GENRES: int = 600        # 10 minutes
     CACHE_TTL_THEATERS: int = 600      # 10 minutes
 
+    # Virtual Queue Settings
+    QUEUE_ENABLED: bool = True
+    QUEUE_MAX_ACTIVE_USERS_PER_SHOWTIME: int = 30
+    QUEUE_PASS_TOKEN_EXPIRE_MINUTES: int = 5
+
     @property
     def allowed_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",")]

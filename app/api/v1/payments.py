@@ -198,6 +198,10 @@ async def vnpay_ipn(
     if not reservation:
         return JSONResponse(content={"RspCode": "01", "Message": "Order not found"})
 
+    # VNPay IPN Spec: Check if order was already confirmed to ensure idempotency
+    if reservation.status == ReservationStatus.CONFIRMED:
+        return JSONResponse(content={"RspCode": "02", "Message": "Order already confirmed"})
+
     if response_code == "00":
         await service.confirm_payment_success(reservation_id, query_params)
         return JSONResponse(content={"RspCode": "00", "Message": "Confirm Success"})
@@ -206,3 +210,46 @@ async def vnpay_ipn(
             reservation_id, query_params, reason=f"IPN Failed code {response_code}"
         )
         return JSONResponse(content={"RspCode": "00", "Message": "Confirm Success"})
+
+
+class CashPaymentConfirmRequest(BaseModel):
+    reservation_id: int = Field(..., description="ID của reservation đang ở trạng thái PENDING")
+
+
+@router.post(
+    "/cash-confirm",
+    summary="Xác nhận thanh toán bằng Tiền mặt tại rạp",
+)
+async def confirm_cash_payment(
+    req: CashPaymentConfirmRequest,
+    current_user: User = Depends(get_current_active_user),
+    service: ReservationService = Depends(get_reservation_service),
+):
+    """
+    Xác nhận thanh toán tiền mặt tại rạp chiếu cho đơn đặt vé ở trạng thái PENDING.
+    """
+    reservation = await service.get_reservation(req.reservation_id)
+    if not reservation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy đơn đặt vé",
+        )
+
+    if reservation.user_id != current_user.id and current_user.role.value != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền thanh toán đơn đặt vé này",
+        )
+
+    if reservation.status == ReservationStatus.CONFIRMED:
+        return {"status": "success", "message": "Đơn đặt vé đã được xác nhận thanh toán", "reservation_id": reservation.id}
+
+    if reservation.status != ReservationStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Đơn đặt vé ở trạng thái {reservation.status.value}, không thể xác nhận thanh toán",
+        )
+
+    await service.confirm_payment_success(req.reservation_id, {}, payment_method="cash")
+    logger.info("cash_payment_confirmed", reservation_id=req.reservation_id, user_id=current_user.id)
+    return {"status": "success", "message": "Xác nhận thanh toán tiền mặt thành công", "reservation_id": req.reservation_id}

@@ -15,12 +15,26 @@ logger = structlog.get_logger()
 
 async def init_db() -> None:
     """Initialize the database: seed admin, rooms, and movies."""
+    await _migrate_schema()
     await _seed_admin()
     await _seed_rooms()
     await _seed_tmdb_movies()
     await _seed_showtimes()
     await _seed_vouchers()
     logger.info("Database initialized successfully")
+
+
+async def _migrate_schema() -> None:
+    """Ensure missing columns like exchanged_from_reservation_id are added to DB tables."""
+    async with AsyncSessionLocal() as db:
+        try:
+            await db.execute(
+                text("ALTER TABLE reservations ADD COLUMN exchanged_from_reservation_id INTEGER REFERENCES reservations(id) ON DELETE SET NULL;")
+            )
+            await db.commit()
+            logger.info("Added exchanged_from_reservation_id column to reservations table")
+        except Exception:
+            await db.rollback()
 
 
 async def _seed_admin() -> None:

@@ -1,14 +1,15 @@
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
 import structlog
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_active_user, get_db, get_redis, require_admin
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.schemas.reservation import (
+    CancelReservationRequest,
     ReservationCreate,
     ReservationExchangeRequest,
     ReservationListResponse,
@@ -18,6 +19,7 @@ from app.schemas.reservation import (
     ShowtimeSummary,
 )
 from app.services.cache_service import CacheService
+from app.services.queue_service import QueueService
 from app.services.reservation_service import ReservationService
 from app.utils.pagination import PaginationParams, paginate
 
@@ -56,17 +58,24 @@ async def get_my_reservations(
 )
 async def create_reservation(
     data: ReservationCreate,
+    x_queue_pass_token: Optional[str] = Header(None, alias="X-Queue-Pass-Token"),
     current_user: User = Depends(get_current_active_user),
     service: ReservationService = Depends(get_reservation_service),
+    redis=Depends(get_redis),
 ):
     """
     Reserve seats for a showtime.
-
-    - Provide showtime_id and a list of seat_ids
-    - Seats must be available
-    - Showtime must be in the future
-    - Uses database locking to prevent overbooking
+    Validates Virtual Queue Pass Token if queueing is enabled.
     """
+    queue_service = QueueService(redis)
+    is_valid_token = await queue_service.validate_pass_token(data.showtime_id, current_user.id, x_queue_pass_token)
+    if not is_valid_token:
+        raise HTTPException(
+            status_code=403,
+            detail="Phiên làm việc đã hết hạn hoặc bạn chưa qua phòng chờ. Vui lòng xếp hàng lại!",
+            headers={"X-Error-Code": "QUEUE_TOKEN_EXPIRED"},
+        )
+
     reservation = await service.create_reservation(current_user.id, data)
     return _build_reservation_response(reservation)
 
@@ -92,6 +101,7 @@ async def get_reservation(
 )
 async def cancel_reservation(
     reservation_id: int,
+    payload: Optional[CancelReservationRequest] = None,
     current_user: User = Depends(get_current_active_user),
     service: ReservationService = Depends(get_reservation_service),
 ):
@@ -100,7 +110,8 @@ async def cancel_reservation(
     - Only upcoming showtime reservations can be cancelled
     - Seats are freed up upon cancellation
     """
-    reservation = await service.cancel_reservation(reservation_id, current_user.id)
+    reason = payload.reason if payload else None
+    reservation = await service.cancel_reservation(reservation_id, current_user.id, reason=reason)
     return _build_reservation_response(reservation)
 
 
@@ -112,11 +123,13 @@ async def cancel_reservation(
 )
 async def cancel_reservation_post(
     reservation_id: int,
+    payload: Optional[CancelReservationRequest] = None,
     current_user: User = Depends(get_current_active_user),
     service: ReservationService = Depends(get_reservation_service),
 ):
     """Cancel a reservation (POST alias)."""
-    reservation = await service.cancel_reservation(reservation_id, current_user.id)
+    reason = payload.reason if payload else None
+    reservation = await service.cancel_reservation(reservation_id, current_user.id, reason=reason)
     return _build_reservation_response(reservation)
 
 
@@ -238,6 +251,7 @@ def _build_reservation_response(reservation) -> ReservationResponse:
         ticket_code=ticket_code,
         total_price=reservation.total_price,
         status=reservation.status,
+        payment_method=reservation.payment_method,
         is_used=reservation.is_used,
         checked_in_at=reservation.checked_in_at,
         notes=reservation.notes,

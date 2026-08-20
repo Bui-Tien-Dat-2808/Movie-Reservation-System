@@ -36,6 +36,7 @@ async def test_generate_couple_seats():
 async def test_reservation_pricing_for_couple_seats():
     """Test that reservation service calculates couple_price correctly for COUPLE seats."""
     mock_db = AsyncMock()
+    mock_db.add = MagicMock()
     mock_cache = MagicMock()
 
     service = ReservationService(mock_db, mock_cache)

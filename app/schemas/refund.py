@@ -24,6 +24,8 @@ class RefundResponse(BaseModel):
     user_email: Optional[str] = None
     user_full_name: Optional[str] = None
     movie_title: Optional[str] = None
+    payment_method: Optional[str] = "vnpay"
+    cancellation_reason: Optional[str] = "Khách hàng huỷ vé"
 
     model_config = ConfigDict(from_attributes=True)
 

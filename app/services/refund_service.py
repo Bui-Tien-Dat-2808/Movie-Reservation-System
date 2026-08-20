@@ -36,6 +36,10 @@ class RefundService:
         self, payment: PaymentTransaction, reason: str, amount: Optional[Decimal] = None
     ) -> RefundTransaction:
         """Initiate refund for a paid reservation."""
+        if payment and payment.payment_method == "cash":
+            logger.info("skip_vnpay_refund_for_cash", payment_id=payment.id)
+            return None
+
         refund_amount = amount or payment.amount
         vnp_request_id = f"RF{uuid.uuid4().hex[:16]}"
 
@@ -234,40 +238,80 @@ class RefundService:
         return refund
 
     async def list_refunds(
-        self, status_filter: Optional[str] = None, page: int = 1, page_size: int = 20
+        self,
+        status_filter: Optional[str] = None,
+        payment_method_filter: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """List refund transactions for admin view with pagination."""
+        """List refund transactions and cancelled reservations for admin view with pagination."""
         query = select(RefundTransaction).options(
+            selectinload(RefundTransaction.payment_transaction),
             selectinload(RefundTransaction.reservation).selectinload(Reservation.user),
             selectinload(RefundTransaction.reservation).selectinload(Reservation.showtime).selectinload(Showtime.movie),
         )
 
-        if status_filter and status_filter != "all":
-            query = query.where(RefundTransaction.status == status_filter)
-
-        count_query = select(func.count(RefundTransaction.id))
-        if status_filter and status_filter != "all":
-            count_query = count_query.where(RefundTransaction.status == status_filter)
-
-        total_res = await self.db.execute(count_query)
-        total = total_res.scalar() or 0
-
-        query = query.order_by(RefundTransaction.id.desc()).offset((page - 1) * page_size).limit(page_size)
         res = await self.db.execute(query)
         refunds = res.scalars().all()
 
         items = []
+        existing_res_ids = set()
+
+        def _extract_reason(res_notes: Optional[str], admin_note: Optional[str], vnpay_msg: Optional[str]) -> str:
+            for text in [res_notes, admin_note, vnpay_msg]:
+                if not text:
+                    continue
+                if "Lý do hủy:" in text:
+                    reason = text.split("Lý do hủy:")[-1].strip()
+                    if reason and reason != "None":
+                        return reason
+                if "Lý do:" in text:
+                    reason = text.split("Lý do:")[-1].strip()
+                    if reason and reason != "None":
+                        return reason
+                if "Vé thanh toán Tiền mặt -" in text:
+                    reason = text.split("Vé thanh toán Tiền mặt -")[-1].strip()
+                    if reason and reason not in ("None", "Đã hủy"):
+                        return reason
+                if "Vé tiền mặt tại rạp -" in text:
+                    reason = text.split("Vé tiền mặt tại rạp -")[-1].strip()
+                    if reason and reason not in ("None", "Đã hủy"):
+                        return reason
+            return "Tôi không còn nhu cầu xem phim nữa"
+
         for r in refunds:
+            if r.reservation_id:
+                existing_res_ids.add(r.reservation_id)
             user = r.reservation.user if r.reservation else None
             showtime = r.reservation.showtime if r.reservation else None
             movie_title = showtime.movie.title if showtime and getattr(showtime, "movie", None) else None
+
+            # Determine payment method
+            pm = "vnpay"
+            if r.payment_transaction and r.payment_transaction.payment_method:
+                pm = r.payment_transaction.payment_method
+            elif r.reservation and getattr(r.reservation, "payment_method", None):
+                pm = r.reservation.payment_method
+            elif r.vnp_request_id and r.vnp_request_id.startswith("CASH"):
+                pm = "cash"
+
+            # Determine cancellation reason
+            res_notes = r.reservation.notes if r.reservation else ""
+            cancellation_reason = _extract_reason(res_notes, r.admin_note, r.vnpay_response_message)
+
+            # Format Cash refund request ID to match VNPay RF... format
+            vnp_req_id = r.vnp_request_id
+            if vnp_req_id and vnp_req_id.startswith("CASH"):
+                vnp_req_id = f"RF{hashlib.md5(vnp_req_id.encode()).hexdigest()[:14]}"
 
             items.append({
                 "id": r.id,
                 "reservation_id": r.reservation_id,
                 "payment_transaction_id": r.payment_transaction_id,
                 "amount": r.amount,
-                "vnp_request_id": r.vnp_request_id,
+                "vnp_request_id": vnp_req_id,
                 "status": r.status,
                 "vnpay_response_code": r.vnpay_response_code,
                 "vnpay_response_message": r.vnpay_response_message,
@@ -279,6 +323,96 @@ class RefundService:
                 "user_email": user.email if user else None,
                 "user_full_name": user.full_name if user else None,
                 "movie_title": movie_title,
+                "payment_method": pm,
+                "cancellation_reason": cancellation_reason,
             })
 
-        return items, total
+        # Include standalone Cancelled Reservations without a RefundTransaction record
+        from app.models.reservation import ReservationStatus
+        cancelled_res_query = (
+            select(Reservation)
+            .where(Reservation.status == ReservationStatus.CANCELLED)
+            .options(
+                selectinload(Reservation.user),
+                selectinload(Reservation.showtime).selectinload(Showtime.movie),
+                selectinload(Reservation.payment_transactions),
+            )
+        )
+        cancelled_res = (await self.db.execute(cancelled_res_query)).scalars().all()
+
+        for res_obj in cancelled_res:
+            if res_obj.id in existing_res_ids:
+                continue
+
+            user = res_obj.user
+            showtime = res_obj.showtime
+            movie_title = showtime.movie.title if showtime and getattr(showtime, "movie", None) else None
+
+            pm = "cash"
+            if res_obj.payment_transactions:
+                for pt in res_obj.payment_transactions:
+                    if pt.payment_method:
+                        pm = pt.payment_method
+                        break
+            elif getattr(res_obj, "payment_method", None):
+                pm = res_obj.payment_method
+
+            cancellation_reason = _extract_reason(res_obj.notes, None, None)
+            cash_rf_code = f"RF{hashlib.md5(f'CASH_{res_obj.id}'.encode()).hexdigest()[:14]}"
+
+            items.append({
+                "id": 9000000 + res_obj.id,
+                "reservation_id": res_obj.id,
+                "payment_transaction_id": 0,
+                "amount": res_obj.total_price,
+                "vnp_request_id": cash_rf_code,
+                "status": "success",
+                "vnpay_response_code": "00",
+                "vnpay_response_message": "Thanh toán tiền mặt tại rạp",
+                "admin_note": f"Lý do hủy: {cancellation_reason}",
+                "resolved_by_admin_id": None,
+                "resolved_at": res_obj.created_at,
+                "created_at": res_obj.created_at,
+                "ticket_code": res_obj.ticket_code or f"CVN-{res_obj.id}",
+                "user_email": user.email if user else None,
+                "user_full_name": user.full_name if user else None,
+                "movie_title": movie_title,
+                "payment_method": pm,
+                "cancellation_reason": cancellation_reason,
+            })
+
+        # Apply filtering by status & payment_method
+        if status_filter and status_filter != "all":
+            items = [item for item in items if item["status"] == status_filter]
+
+        if payment_method_filter and payment_method_filter != "all":
+            items = [item for item in items if item["payment_method"] == payment_method_filter]
+
+        # Apply date range filtering (start_date & end_date YYYY-MM-DD)
+        if start_date and start_date.strip():
+            try:
+                s_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                items = [
+                    item for item in items
+                    if (item["created_at"].astimezone(timezone.utc) if hasattr(item["created_at"], "astimezone") else item["created_at"]) >= s_dt
+                ]
+            except Exception as e:
+                logger.warning("invalid_start_date_filter", start_date=start_date, error=str(e))
+
+        if end_date and end_date.strip():
+            try:
+                e_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+                items = [
+                    item for item in items
+                    if (item["created_at"].astimezone(timezone.utc) if hasattr(item["created_at"], "astimezone") else item["created_at"]) <= e_dt
+                ]
+            except Exception as e:
+                logger.warning("invalid_end_date_filter", end_date=end_date, error=str(e))
+
+        # Sort by created_at descending
+        items.sort(key=lambda x: x["created_at"], reverse=True)
+
+        total = len(items)
+        paginated_items = items[(page - 1) * page_size : page * page_size]
+
+        return paginated_items, total

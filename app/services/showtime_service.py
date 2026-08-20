@@ -331,17 +331,36 @@ class ShowtimeService:
             await self.db.commit()
             showtime = await self.get_showtime(showtime_id)
 
+        now = datetime.now(timezone.utc)
         seats = []
         available_count = 0
         reserved_count = 0
 
+        needs_flush = False
         for ss in showtime.showtime_seats:
+            if ss.status == SeatStatus.HELD:
+                held_until_aware = (
+                    ss.held_until.replace(tzinfo=timezone.utc)
+                    if ss.held_until and ss.held_until.tzinfo is None
+                    else (ss.held_until.astimezone(timezone.utc) if ss.held_until else None)
+                )
+                if held_until_aware and held_until_aware <= now:
+                    ss.status = SeatStatus.AVAILABLE
+                    ss.held_by = None
+                    ss.held_until = None
+                    self.db.add(ss)
+                    needs_flush = True
+
             if ss.status == SeatStatus.AVAILABLE:
                 available_count += 1
             elif ss.status == SeatStatus.BOOKED:
                 reserved_count += 1
 
             seats.append(ss)
+
+        if needs_flush:
+            await self.db.flush()
+            await self.db.commit()
 
         return {
             "showtime_id": showtime_id,
@@ -568,7 +587,9 @@ class ShowtimeService:
                     # B3: Extend weekend closing time to 00:30 AM next day by default
                     end_h, end_m = 0, 30
 
-                day_start_dt = datetime.combine(curr_d, time_cls(start_h, start_m), tzinfo=cinema_tz).astimezone(timezone.utc)
+                stagger_mins = getattr(req, "stagger_interval_minutes", 15) if getattr(req, "stagger_interval_minutes", 15) is not None else 15
+                stagger_offset = timedelta(minutes=(room_idx * stagger_mins))
+                day_start_dt = datetime.combine(curr_d, time_cls(start_h, start_m), tzinfo=cinema_tz).astimezone(timezone.utc) + stagger_offset
 
                 if end_h < start_h or (end_h == 0 and end_m > 0):
                     end_date_for_day = curr_d + timedelta(days=1)
@@ -621,7 +642,23 @@ class ShowtimeService:
                         ex_end = ensure_utc(ex.end_time)
                         if slot_time < ex_end and st_end > ex_start:
                             has_collision = True
-                            slot_time = ex_end + timedelta(minutes=req.buffer_minutes)
+                            # Smart Gap Filling: Try to find another active movie in pool that fits in [slot_time, ex_start]
+                            available_gap_mins = (ex_start - slot_time).total_seconds() / 60.0
+                            fitting_movie = None
+                            for cand in pool:
+                                cand_dur = cand.duration_minutes or 120
+                                if cand_dur + req.buffer_minutes <= available_gap_mins:
+                                    fitting_movie = cand
+                                    break
+
+                            if fitting_movie:
+                                m = fitting_movie
+                                duration_mins = m.duration_minutes or 120
+                                st_end = slot_time + timedelta(minutes=duration_mins)
+                                has_collision = False
+                            else:
+                                # Cannot fit any movie in this gap, jump slot_time past existing showtime
+                                slot_time = ex_end + timedelta(minutes=req.buffer_minutes)
                             break
 
                     if has_collision:

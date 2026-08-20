@@ -2,7 +2,7 @@ from typing import AsyncGenerator, Optional
 
 import redis.asyncio as aioredis
 import structlog
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,10 +53,11 @@ async def get_redis() -> aioredis.Redis:
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    token: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     redis=Depends(get_redis),
 ):
-    """Validate access token and return the current user."""
+    """Validate access token and return the current user (supports Header and Query param for SSE)."""
     from app.models.user import User
     from sqlalchemy import select
 
@@ -66,17 +67,18 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    if credentials is None:
+    raw_token = credentials.credentials if credentials else token
+    if not raw_token:
         raise credentials_exception
 
-    token_data = verify_access_token(credentials.credentials)
+    token_data = verify_access_token(raw_token)
     if token_data is None:
         raise credentials_exception
 
     # Check blacklist (logout validation)
     from app.services.cache_service import CacheService
     cache = CacheService(redis)
-    if await cache.is_access_token_blacklisted(credentials.credentials):
+    if await cache.is_access_token_blacklisted(raw_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token is invalidated (logged out)",

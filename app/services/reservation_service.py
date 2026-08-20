@@ -188,12 +188,9 @@ class ReservationService:
         )
         full_reservation = result.scalar_one()
 
-        # Award loyalty points for booking
-        from app.services.loyalty_service import LoyaltyService
-        await LoyaltyService.award_points(self.db, full_reservation)
-
         # Invalidate seat cache
         await self.cache.delete_pattern(f"showtimes:seats:{data.showtime_id}")
+
         logger.info(
             "Reservation created",
             reservation_id=reservation.id,
@@ -247,12 +244,16 @@ class ReservationService:
             raise NotFoundException("Reservation", reservation_id)
         return reservation
 
-    async def cancel_reservation(self, reservation_id: int, user_id: int) -> Reservation:
+    async def cancel_reservation(
+        self, reservation_id: int, user_id: int, reason: Optional[str] = None
+    ) -> Reservation:
         """Cancel a reservation (only if showtime is at least 30 minutes in the future)."""
         reservation = await self.get_reservation(reservation_id, user_id)
 
         if reservation.status == ReservationStatus.CANCELLED:
             raise ReservationNotCancellableException()
+
+        cancel_reason = reason.strip() if (reason and reason.strip()) else "Khách hàng huỷ vé"
 
         # Check showtime is at least 30 minutes in the future
         showtime = await self.db.get(Showtime, reservation.showtime_id)
@@ -282,9 +283,13 @@ class ReservationService:
                 ss.held_until = None
 
         reservation.status = ReservationStatus.CANCELLED
+        # Save cancellation reason into reservation notes
+        existing_notes = reservation.notes or ""
+        reason_note = f"Lý do hủy: {cancel_reason}"
+        reservation.notes = f"{existing_notes} | {reason_note}" if (existing_notes and "Lý do hủy:" not in existing_notes) else (reason_note if not existing_notes else existing_notes)
         await self.db.flush()
 
-        # Create refund request if ticket was paid via VNPay
+        # Create refund request if ticket was paid via VNPay or create record for Cash
         from app.models.payment import PaymentTransaction
         payment_result = await self.db.execute(
             select(PaymentTransaction)
@@ -296,22 +301,77 @@ class ReservationService:
         )
         payment = payment_result.scalar_one_or_none()
 
-        if payment:
+        if payment and payment.payment_method == "vnpay":
             from app.services.refund_service import RefundService
             refund_service = RefundService(self.db)
             try:
-                await refund_service.initiate_refund(payment, reason="Khách hàng huỷ vé")
+                await refund_service.initiate_refund(payment, reason=cancel_reason)
             except Exception:
                 logger.exception(
                     "Không thể khởi tạo hoàn tiền tự động cho reservation_id=%s — cần xử lý thủ công",
                     reservation.id,
                 )
+        else:
+            # For Cash payments: create a RefundTransaction record for admin tracking
+            if payment and payment.payment_method == "cash":
+                try:
+                    from app.models.refund import RefundTransaction
+                    cash_refund = RefundTransaction(
+                        reservation_id=reservation.id,
+                        payment_transaction_id=payment.id,
+                        amount=reservation.total_price or payment.amount,
+                        vnp_request_id=f"CASH_{reservation.id}_{int(datetime.now().timestamp())}",
+                        status="success",
+                        vnpay_response_message=f"Vé thanh toán Tiền mặt - {cancel_reason}",
+                        admin_note=f"Lý do hủy: {cancel_reason}",
+                    )
+                    self.db.add(cash_refund)
+                    await self.db.flush()
+                except Exception as e:
+                    logger.warning("Failed to create cash refund transaction record", reservation_id=reservation.id, error=str(e))
+
+            # Cash ticket cancellation email notification (thread-safe)
+            try:
+                user_res = await self.db.execute(select(User).where(User.id == reservation.user_id))
+                user_obj = user_res.scalar_one_or_none()
+                if user_obj and user_obj.email:
+                    movie_title = (
+                        reservation.showtime.movie.title
+                        if reservation.showtime and getattr(reservation.showtime, "movie", None)
+                        else "Phim CineVerse"
+                    )
+                    ticket_code = reservation.ticket_code or f"CVN-{reservation.id}"
+                    amount = reservation.total_price
+
+                    import asyncio
+                    from app.services.email_service import EmailService
+                    from app.utils.background import fire_and_forget
+                    fire_and_forget(
+                        asyncio.to_thread(
+                            EmailService.send_cash_cancellation_email,
+                            user_obj.email,
+                            ticket_code,
+                            movie_title,
+                            amount,
+                            cancel_reason,
+                        )
+                    )
+            except Exception as e:
+                logger.warning("cash_cancel_email_trigger_failed", reservation_id=reservation.id, error=str(e))
 
         await self.db.flush()
 
         # Revoke loyalty points for cancelled booking
         from app.services.loyalty_service import LoyaltyService
         await LoyaltyService.revoke_points(self.db, reservation)
+
+        # Release user from Virtual Queue active set
+        try:
+            from app.services.queue_service import QueueService
+            queue_svc = QueueService(self.cache.redis)
+            await queue_svc.leave_queue(reservation.showtime_id, user_id)
+        except Exception as e:
+            logger.warning("Failed to release queue slot after reservation cancelled", error=str(e))
 
         await self.cache.delete_pattern(f"showtimes:seats:{reservation.showtime_id}")
         logger.info("Reservation cancelled", reservation_id=reservation_id, user_id=user_id)
@@ -340,23 +400,7 @@ class ReservationService:
                 f"Vé chỉ có thể đổi sang suất khác trước giờ chiếu tối thiểu {min_mins} phút."
             )
 
-        # 1. Release old seats
-        for rs in old_reservation.reservation_seats:
-            ss_result = await self.db.execute(
-                select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id)
-            )
-            ss = ss_result.scalar_one_or_none()
-            if ss:
-                ss.status = SeatStatus.AVAILABLE
-
-        # Mark old reservation as EXCHANGED
-        old_reservation.status = ReservationStatus.EXCHANGED
-        old_reservation.notes = f"Exchanged to new showtime ID {data.new_showtime_id}"
-        await self.db.flush()
-
-        await self.cache.delete_pattern(f"showtimes:seats:{old_reservation.showtime_id}")
-
-        # 2. Create new reservation
+        # Create new reservation (PENDING)
         from app.schemas.reservation import ReservationCreate
         new_res_create = ReservationCreate(
             showtime_id=data.new_showtime_id,
@@ -366,8 +410,13 @@ class ReservationService:
 
         new_reservation = await self.create_reservation(user_id=user_id, data=new_res_create)
 
+        # Record link to old reservation — old reservation stays CONFIRMED until new reservation payment succeeds
+        new_reservation.exchanged_from_reservation_id = old_reservation.id
+        self.db.add(new_reservation)
+        await self.db.flush()
+
         logger.info(
-            "Reservation exchanged successfully",
+            "Reservation exchange initiated",
             old_reservation_id=reservation_id,
             new_reservation_id=new_reservation.id,
             user_id=user_id,
@@ -546,12 +595,13 @@ class ReservationService:
         }
 
     async def confirm_payment_success(
-        self, reservation_id: int, vnp_params: dict
+        self, reservation_id: int, vnp_params: Optional[dict] = None, payment_method: str = "vnpay"
     ) -> Reservation:
         """
         Transition reservation from PENDING -> CONFIRMED, mark seats as BOOKED,
         and log PaymentTransaction.
         """
+        vnp_params = vnp_params or {}
         reservation = await self.get_reservation(reservation_id)
         if not reservation:
             raise NotFoundException(f"Reservation {reservation_id} not found")
@@ -562,6 +612,28 @@ class ReservationService:
         # 1. Update Reservation status
         reservation.status = ReservationStatus.CONFIRMED
         self.db.add(reservation)
+
+        # If this reservation was created from an exchange, finalize old reservation now that new payment succeeded
+        if getattr(reservation, "exchanged_from_reservation_id", None):
+            old_res_result = await self.db.execute(
+                select(Reservation)
+                .options(selectinload(Reservation.reservation_seats))
+                .where(Reservation.id == reservation.exchanged_from_reservation_id)
+            )
+            old_reservation = old_res_result.scalar_one_or_none()
+            if old_reservation and old_reservation.status == ReservationStatus.CONFIRMED:
+                for rs in old_reservation.reservation_seats:
+                    ss_result = await self.db.execute(
+                        select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id)
+                    )
+                    ss = ss_result.scalar_one_or_none()
+                    if ss:
+                        ss.status = SeatStatus.AVAILABLE
+                        self.db.add(ss)
+                old_reservation.status = ReservationStatus.EXCHANGED
+                old_reservation.notes = f"Exchanged to reservation ID {reservation.id}"
+                self.db.add(old_reservation)
+                await self.cache.delete_pattern(f"showtimes:seats:{old_reservation.showtime_id}")
 
         # 2. Lock & update ShowtimeSeats from HELD -> BOOKED
         rs_result = await self.db.execute(
@@ -583,7 +655,9 @@ class ReservationService:
         # 3. Add or update PaymentTransaction
         from app.models.payment import PaymentTransaction
         vnp_txn_ref = vnp_params.get("vnp_TxnRef", f"RES_{reservation.id}")
-        
+        bank_code = "CASH" if payment_method == "cash" else vnp_params.get("vnp_BankCode")
+        card_type = "CASH" if payment_method == "cash" else vnp_params.get("vnp_CardType")
+
         existing_tx_result = await self.db.execute(
             select(PaymentTransaction).where(PaymentTransaction.vnp_txn_ref == vnp_txn_ref)
         )
@@ -591,9 +665,10 @@ class ReservationService:
 
         if existing_tx:
             existing_tx.status = "success"
-            existing_tx.transaction_no = vnp_params.get("vnp_TransactionNo")
-            existing_tx.bank_code = vnp_params.get("vnp_BankCode")
-            existing_tx.card_type = vnp_params.get("vnp_CardType")
+            existing_tx.payment_method = payment_method
+            existing_tx.transaction_no = vnp_params.get("vnp_TransactionNo", "CASH")
+            existing_tx.bank_code = bank_code
+            existing_tx.card_type = card_type
             existing_tx.response_code = vnp_params.get("vnp_ResponseCode", "00")
             existing_tx.pay_date = datetime.now(timezone.utc)
             self.db.add(existing_tx)
@@ -601,20 +676,28 @@ class ReservationService:
             tx = PaymentTransaction(
                 reservation_id=reservation.id,
                 amount=reservation.total_price,
-                payment_method="vnpay",
+                payment_method=payment_method,
                 vnp_txn_ref=vnp_txn_ref,
-                transaction_no=vnp_params.get("vnp_TransactionNo"),
-                bank_code=vnp_params.get("vnp_BankCode"),
-                card_type=vnp_params.get("vnp_CardType"),
+                transaction_no=vnp_params.get("vnp_TransactionNo", "CASH"),
+                bank_code=bank_code,
+                card_type=card_type,
                 response_code=vnp_params.get("vnp_ResponseCode", "00"),
                 status="success",
                 pay_date=datetime.now(timezone.utc),
             )
             self.db.add(tx)
 
-        # 4. Award loyalty points to user
+        # 4. Award loyalty points to user (only upon confirmed payment)
         from app.services.loyalty_service import LoyaltyService
         await LoyaltyService.award_points(self.db, reservation)
+
+        # Release user from Virtual Queue active set now that booking is fully completed
+        try:
+            from app.services.queue_service import QueueService
+            queue_svc = QueueService(self.cache.redis)
+            await queue_svc.leave_queue(reservation.showtime_id, reservation.user_id)
+        except Exception as e:
+            logger.warning("Failed to release queue slot after payment confirmed", error=str(e))
 
         await self.db.commit()
         await self.db.refresh(reservation)
@@ -699,6 +782,14 @@ class ReservationService:
                 pay_date=datetime.now(timezone.utc),
             )
             self.db.add(tx)
+
+        # Release user from Virtual Queue active set now that pending reservation is cancelled/expired
+        try:
+            from app.services.queue_service import QueueService
+            queue_svc = QueueService(self.cache.redis)
+            await queue_svc.leave_queue(reservation.showtime_id, reservation.user_id)
+        except Exception as e:
+            logger.warning("Failed to release queue slot after pending reservation cancelled", error=str(e))
 
         await self.db.commit()
         await self.db.refresh(reservation)

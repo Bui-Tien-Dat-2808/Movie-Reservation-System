@@ -35,10 +35,16 @@ class Reservation(Base):
     is_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     checked_in_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    exchanged_from_reservation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("reservations.id", ondelete="SET NULL"), nullable=True
+    )
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="reservations")  # noqa: F821
     showtime: Mapped["Showtime"] = relationship("Showtime", back_populates="reservations")  # noqa: F821
+    exchanged_from_reservation: Mapped[Optional["Reservation"]] = relationship(
+        "Reservation", remote_side="Reservation.id", foreign_keys=[exchanged_from_reservation_id]
+    )
     reservation_seats: Mapped[List["ReservationSeat"]] = relationship(
         "ReservationSeat",
         back_populates="reservation",
@@ -63,6 +69,12 @@ class Reservation(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+
+    @property
+    def payment_method(self) -> str:
+        if self.payment_transactions and len(self.payment_transactions) > 0:
+            return self.payment_transactions[0].payment_method
+        return "vnpay"
 
     def __repr__(self) -> str:
         return f"<Reservation id={self.id} user={self.user_id} status={self.status}>"

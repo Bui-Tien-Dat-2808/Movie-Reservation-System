@@ -120,3 +120,67 @@ class TestPagination:
         result = paginate(items, 100, 1, 10)
         assert len(result.items) == 10
         assert result.meta.total == 100
+
+
+class TestReservationQueueAndLoyaltyLifecycle:
+    """Tests that leave_queue and award_points run ONLY at confirm/cancel, never at pending creation."""
+
+    @pytest.mark.asyncio
+    async def test_pending_creation_does_not_award_points_or_leave_queue(self):
+        from app.services.reservation_service import ReservationService
+        from app.schemas.reservation import ReservationCreate
+        from app.models.showtime import Showtime, ShowtimeStatus
+        from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+        from app.models.user import User
+
+        mock_db = AsyncMock()
+        mock_db.add = MagicMock()
+        mock_cache = AsyncMock()
+        mock_cache.delete_pattern = AsyncMock()
+
+        # Setup mock entities
+        showtime = Showtime(
+            id=1,
+            status=ShowtimeStatus.SCHEDULED,
+            base_price=Decimal("100000"),
+            start_time=datetime.now(timezone.utc) + timedelta(hours=2),
+        )
+        ss1 = ShowtimeSeat(id=10, showtime_id=1, seat_id=100, status=SeatStatus.AVAILABLE)
+
+        user = User(id=50, email="test@user.com", loyalty_points=0)
+
+        # Mock DB queries:
+        # 1. get showtime
+        # 2. get showtime_seats
+        # 3. get full_reservation with relationships
+        mock_res_showtime = MagicMock(scalar_one_or_none=lambda: showtime)
+        mock_res_none = MagicMock(scalar_one_or_none=lambda: None)
+        mock_res_seats = MagicMock(scalars=lambda: MagicMock(all=lambda: [ss1]))
+
+        created_res = MagicMock(id=123, showtime_id=1, user_id=50, total_price=Decimal("100000"), status="pending")
+        mock_res_full = MagicMock(scalar_one=lambda: created_res)
+
+        mock_db.flush = AsyncMock()
+        mock_db.refresh = AsyncMock()
+
+        mock_db.execute.side_effect = [
+            mock_res_showtime,
+            mock_res_seats,
+            mock_res_none,
+            mock_res_full,
+            mock_res_full,
+        ]
+
+        service = ReservationService(mock_db, mock_cache)
+        data = ReservationCreate(showtime_id=1, seat_ids=[100])
+
+        with patch("app.services.loyalty_service.LoyaltyService.award_points", new_callable=AsyncMock) as mock_award, \
+             patch("app.services.queue_service.QueueService.leave_queue", new_callable=AsyncMock) as mock_leave:
+            res = await service.create_reservation(user_id=50, data=data)
+
+            # MUST NOT award points on pending creation!
+            mock_award.assert_not_called()
+
+            # MUST NOT call leave_queue on pending creation!
+            mock_leave.assert_not_called()
+            assert res.id == 123

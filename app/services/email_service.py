@@ -85,6 +85,12 @@ class EmailService:
                     seats_list.append(label)
         seats_str = ", ".join(seats_list) if seats_list else "Đang cập nhật"
 
+        # Payment Method Label
+        pm_code = getattr(reservation, "payment_method", None)
+        if not pm_code and hasattr(reservation, "payment_transactions") and reservation.payment_transactions:
+            pm_code = reservation.payment_transactions[0].payment_method
+        pm_label = "Tiền mặt (Thanh toán tại rạp chiếu)" if pm_code == "cash" else "VNPay / ATM / Ví điện tử"
+
         # Format Concessions / Food Combos if present
         concessions_html = ""
         notes = getattr(reservation, "notes", "") or ""
@@ -164,7 +170,11 @@ class EmailService:
                             <!-- Payment Summary -->
                             <tr>
                                 <td style="padding: 0 24px 24px 24px;">
-                                    <table width="100%" cellspacing="0" cellpadding="0" style="border-t: 1px solid rgba(255,255,255,0.1); padding-top: 16px;">
+                                    <table width="100%" cellspacing="0" cellpadding="0" style="border-top: 1px solid rgba(255,255,255,0.1); padding-top: 16px;">
+                                        <tr>
+                                            <td style="font-size: 13px; color: #a09e9a; padding-bottom: 6px;">Phương thức thanh toán:</td>
+                                            <td align="right" style="font-size: 13px; font-weight: 700; color: #e8b84b; padding-bottom: 6px;">{pm_label}</td>
+                                        </tr>
                                         <tr>
                                             <td style="font-size: 14px; color: #a09e9a;">Tổng tiền đã thanh toán:</td>
                                             <td align="right" style="font-size: 20px; font-weight: 900; color: #2ecc71; font-family: monospace;">{total_price_str}</td>
@@ -322,8 +332,8 @@ class EmailService:
                                         </table>
                                     </div>
 
-                                    <div style="margin-top: 20px; padding: 14px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 10px; text-align: center; font-size: 13px; color: #34d399;">
-                                        ✓ Số tiền <strong>{amount_str}</strong> đã được chuyển về tài khoản/thẻ thanh toán của bạn. Cảm ơn bạn đã đồng hành cùng CineVerse!
+                                    <div style="margin-top: 20px; padding: 14px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 10px; text-align: center; font-size: 13px; color: #34d399; line-height: 1.5;">
+                                        Cảm ơn bạn đã lựa chọn dịch vụ của <strong>CineVerse</strong>. Nếu có bất kỳ thắc mắc hoặc cần hỗ trợ thêm, vui lòng liên hệ tổng đài CSKH: <strong>1900-CINEVERSE</strong>.
                                     </div>
                                 </td>
                             </tr>
@@ -479,4 +489,137 @@ class EmailService:
             return True
         except Exception as e:
             logger.exception("refund_email_send_failed", recipient=user_email, ticket_code=ticket_code, error=str(e))
+            return False
+
+    @classmethod
+    def build_cash_cancellation_email_html(
+        cls, ticket_code: str, movie_title: str, amount: Any, reason: str = "Khách hàng huỷ vé"
+    ) -> str:
+        """Build HTML template for Cash payment ticket cancellation notification."""
+        amount_str = cls.format_currency(amount)
+        reason_display = reason or "Khách hàng hủy vé đặt"
+
+        return f"""
+        <!DOCTYPE html>
+        <html lang="vi" class="notranslate">
+        <head>
+            <meta charset="utf-8">
+            <meta http-equiv="Content-Language" content="vi">
+            <meta name="google" content="notranslate">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Thông Báo Hủy Vé Thành Công - CineVerse</title>
+        </head>
+        <body class="notranslate" style="margin: 0; padding: 0; background-color: #09090e; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f0ede8;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #09090e; padding: 20px 0;">
+                <tr>
+                    <td align="center">
+                        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="background-color: #111118; border: 1px solid rgba(232, 184, 75, 0.3); border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                            
+                            <!-- Header -->
+                            <tr>
+                                <td style="background-color: #1c1917; padding: 24px; text-align: center; border-bottom: 1px solid rgba(232, 184, 75, 0.3);">
+                                    <div style="display: inline-block; background: #e8b84b; color: #09090e; font-weight: 900; font-size: 16px; padding: 4px 12px; border-radius: 6px; margin-bottom: 8px;">
+                                        ❌ THÔNG BÁO HỦY VÉ
+                                    </div>
+                                    <h1 style="margin: 8px 0 0 0; font-size: 22px; font-weight: 800; color: #ffffff;">XÁC NHẬN HỦY VÉ THÀNH CÔNG</h1>
+                                    <p style="margin: 4px 0 0 0; font-size: 13px; color: #d6d3d1;">Đơn đặt vé chọn thanh toán Tiền mặt tại rạp của bạn đã được hủy</p>
+                                </td>
+                            </tr>
+
+                            <!-- Details Card -->
+                            <tr>
+                                <td style="padding: 24px;">
+                                    <div style="background: #161622; border-radius: 12px; padding: 20px; border: 1px solid rgba(255,255,255,0.08);">
+                                        <table width="100%" cellspacing="0" cellpadding="6" style="font-size: 13px; color: #a09e9a;">
+                                            <tr>
+                                                <td width="40%"><strong>Mã vé đã hủy:</strong></td>
+                                                <td><span style="font-family: monospace; font-size: 16px; font-weight: 800; color: #e8b84b;">{ticket_code}</span></td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Bộ phim:</strong></td>
+                                                <td><span style="color: #ffffff; font-weight: 700;">{movie_title}</span></td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Phương thức thanh toán:</strong></td>
+                                                <td><span style="color: #f59e0b; font-weight: 700;">💵 Tiền mặt (Thanh toán tại rạp)</span></td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Tổng giá trị đơn:</strong></td>
+                                                <td><span style="font-family: monospace; font-size: 16px; font-weight: 800; color: #f0ede8;">{amount_str}</span></td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Lý do hủy:</strong></td>
+                                                <td><span style="color: #f0ede8;">{reason_display}</span></td>
+                                            </tr>
+                                        </table>
+                                    </div>
+
+                                    <div style="margin-top: 20px; padding: 14px; background: rgba(232, 184, 75, 0.1); border: 1px solid rgba(232, 184, 75, 0.2); border-radius: 10px; text-align: center; font-size: 13px; color: #fef08a;">
+                                        Cảm ơn bạn đã lựa chọn dịch vụ của <strong>CineVerse</strong>. Nếu có bất kỳ thắc mắc hoặc cần hỗ trợ thêm, vui lòng liên hệ tổng đài CSKH: <strong>1900-CINEVERSE</strong>.
+                                    </div>
+                                </td>
+                            </tr>
+
+                            <!-- Footer -->
+                            <tr>
+                                <td style="background-color: #0d0d14; padding: 16px 24px; text-align: center; border-top: 1px solid rgba(255,255,255,0.08);">
+                                    <p style="margin: 0; font-size: 11px; color: #6e6c68;">
+                                        CineVerse Entertainment Inc. · Hotline hỗ trợ khách hàng: 1900-CINEVERSE
+                                    </p>
+                                </td>
+                            </tr>
+
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+    @classmethod
+    def send_cash_cancellation_email(
+        cls,
+        user_email: str,
+        ticket_code: str,
+        movie_title: str,
+        amount: Any,
+        reason: str = "Khách hàng huỷ vé",
+    ) -> bool:
+        """
+        Thread-safe email dispatch for Cash payment ticket cancellation.
+        """
+        if not user_email:
+            logger.warning("cash_cancel_email_skipped_no_email", ticket_code=ticket_code)
+            return False
+
+        if not settings.EMAIL_ENABLED or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+            logger.info(
+                "cash_cancel_email_logged_dev_mode",
+                recipient=user_email,
+                ticket_code=ticket_code,
+                reason=reason,
+            )
+            return True
+
+        try:
+            from_email = settings.SMTP_USER or settings.EMAILS_FROM_EMAIL
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"❌ THÔNG BÁO HỦY VÉ THÀNH CÔNG - Vé {ticket_code} (CineVerse)"
+            msg["From"] = f"{settings.EMAILS_FROM_NAME} <{from_email}>"
+            msg["To"] = user_email
+
+            html_content = cls.build_cash_cancellation_email_html(ticket_code, movie_title, amount, reason)
+            html_part = MIMEText(html_content, "html", "utf-8")
+            msg.attach(html_part)
+
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10.0) as server:
+                server.starttls()
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.send_message(msg)
+
+            logger.info("cash_cancel_email_sent_successfully", recipient=user_email, ticket_code=ticket_code)
+            return True
+        except Exception as e:
+            logger.exception("cash_cancel_email_send_failed", recipient=user_email, ticket_code=ticket_code, error=str(e))
             return False

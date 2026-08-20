@@ -12,9 +12,10 @@ from app.core.exceptions import ValidationException
 
 
 @pytest.mark.asyncio
-async def test_exchange_reservation_success():
-    """Test successful exchange of a confirmed upcoming reservation."""
+async def test_exchange_reservation_deferred_status_until_payment():
+    """Test that exchange_reservation creates a PENDING reservation linked to old reservation, keeping old ticket CONFIRMED until payment."""
     mock_db = AsyncMock()
+    mock_db.add = MagicMock()
     mock_db.flush = AsyncMock()
     mock_cache = MagicMock()
     mock_cache.delete_pattern = AsyncMock()
@@ -36,28 +37,27 @@ async def test_exchange_reservation_success():
     )
     old_rs = ReservationSeat(id=50, reservation_id=5, showtime_seat_id=500, price=Decimal("90000"))
     old_res.reservation_seats = [old_rs]
-
     old_ss = ShowtimeSeat(id=500, showtime_id=1, seat_id=1000, status=SeatStatus.BOOKED)
 
-    # Mock DB returns
+    # Mock DB returns old reservation
     mock_db.execute.side_effect = [
-        # get_reservation query
         MagicMock(scalar_one_or_none=lambda: old_res),
-        # select ShowtimeSeat for freeing old seat
-        MagicMock(scalar_one_or_none=lambda: old_ss),
     ]
 
-    # Mock create_reservation for new showtime
-    new_res = Reservation(id=6, user_id=42, showtime_id=2, status=ReservationStatus.CONFIRMED, total_price=Decimal("90000"))
+    # Mock create_reservation for new showtime (PENDING)
+    new_res = Reservation(id=6, user_id=42, showtime_id=2, status=ReservationStatus.PENDING, total_price=Decimal("90000"))
     service.create_reservation = AsyncMock(return_value=new_res)
 
     req = ReservationExchangeRequest(new_showtime_id=2, new_seat_ids=[501])
 
     result = await service.exchange_reservation(reservation_id=5, user_id=42, data=req)
 
+    # 1. New reservation is created and linked to old reservation
     assert result.id == 6
-    assert old_res.status == ReservationStatus.EXCHANGED
-    assert old_ss.status == SeatStatus.AVAILABLE
+    assert result.exchanged_from_reservation_id == 5
+    # 2. Old reservation & seats REMAIN CONFIRMED / BOOKED before payment!
+    assert old_res.status == ReservationStatus.CONFIRMED
+    assert old_ss.status == SeatStatus.BOOKED
 
 
 @pytest.mark.asyncio

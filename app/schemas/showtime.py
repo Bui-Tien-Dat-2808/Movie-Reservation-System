@@ -100,6 +100,7 @@ class AutoScheduleRequest(BaseModel):
     replace_existing: bool = True
     smart_genre_matching: bool = True
     auto_pricing_by_room_type: bool = True
+    stagger_interval_minutes: int = Field(15, ge=0, le=60)
 
 
 class ProposedShowtimeItem(BaseModel):

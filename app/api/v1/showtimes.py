@@ -1,7 +1,7 @@
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_active_user, get_db, get_redis, require_admin
@@ -217,23 +217,31 @@ async def bulk_cancel_showtimes(
 async def hold_seats(
     showtime_id: int,
     data: SeatHoldRequest,
+    x_queue_pass_token: Optional[str] = Header(None, alias="X-Queue-Pass-Token"),
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     user=Depends(get_current_active_user),
 ):
     """
     Temporarily hold seats for a showtime (10 minutes).
-
-    Uses SELECT FOR UPDATE to prevent race conditions:
-    - If two users request the same last seat simultaneously, PostgreSQL serializes
-      the lock. The second user will see the seat as HELD after the first commits,
-      and receive a 409 SEAT_UNAVAILABLE response with a clear error message.
-    - A user may re-hold seats they already hold (extends the hold by 10 minutes).
+    Validates Virtual Queue Pass Token if queueing is enabled.
     """
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import select
     from app.models.showtime import Showtime, ShowtimeStatus
     from app.models.showtime_seat import ShowtimeSeat, SeatStatus
     from app.core.exceptions import NotFoundException, SeatUnavailableException, ShowtimePastException
+    from app.services.queue_service import QueueService
+
+    # 0. Validate Queue Pass Token
+    queue_service = QueueService(redis)
+    is_valid_token = await queue_service.validate_pass_token(showtime_id, user.id, x_queue_pass_token)
+    if not is_valid_token:
+        raise HTTPException(
+            status_code=403,
+            detail="Phiên làm việc đã hết hạn hoặc bạn chưa qua phòng chờ. Vui lòng xếp hàng lại!",
+            headers={"X-Error-Code": "QUEUE_TOKEN_EXPIRED"},
+        )
 
     # 1. Validate showtime
     showtime = await db.get(Showtime, showtime_id)

@@ -162,3 +162,36 @@ def test_send_refund_notification_email_smtp():
             note_or_reason="Lỗi hệ thống cổng VNPay",
         )
         assert res_fail is True
+
+
+def test_build_cash_cancellation_email_html():
+    html = EmailService.build_cash_cancellation_email_html(
+        ticket_code="CVN-CASH99",
+        movie_title="Avengers Doomsday",
+        amount=207000,
+        reason="Khách hàng huỷ vé",
+    )
+    assert "CVN-CASH99" in html
+    assert "Avengers Doomsday" in html
+    assert "207.000₫" in html
+    assert "Tiền mặt (Thanh toán tại rạp)" in html
+    assert "XÁC NHẬN HỦY VÉ THÀNH CÔNG" in html
+
+
+def test_send_cash_cancellation_email_smtp():
+    with patch("app.services.email_service.settings.EMAIL_ENABLED", True), \
+         patch("app.services.email_service.settings.SMTP_USER", "sender@test.com"), \
+         patch("app.services.email_service.settings.SMTP_PASSWORD", "secret_pass"), \
+         patch("smtplib.SMTP") as mock_smtp:
+
+        mock_server = MagicMock()
+        mock_smtp.return_value.__enter__.return_value = mock_server
+
+        res_ok = EmailService.send_cash_cancellation_email(
+            user_email="buid1066@gmail.com",
+            ticket_code="CVN-CASH99",
+            movie_title="Avengers Doomsday",
+            amount=207000,
+            reason="Khách hàng huỷ vé",
+        )
+        assert res_ok is True

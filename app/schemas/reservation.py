@@ -42,6 +42,10 @@ class ReservationExchangeRequest(BaseModel):
     new_seat_ids: List[int] = Field(..., min_length=1, max_length=10)
 
 
+class CancelReservationRequest(BaseModel):
+    reason: Optional[str] = Field(None, description="Lý do huỷ vé xem phim")
+
+
 class ReservationResponse(BaseModel):
     id: int
     showtime_id: int
@@ -51,9 +55,11 @@ class ReservationResponse(BaseModel):
     voucher_code: Optional[str] = None
     discount_amount: Decimal = Decimal("0.00")
     status: ReservationStatus
+    payment_method: Optional[str] = "vnpay"
     is_used: bool = False
     checked_in_at: Optional[datetime] = None
     notes: Optional[str] = None
+    exchanged_from_reservation_id: Optional[int] = None
     reservation_seats: List[ReservationSeatResponse] = []
     showtime: Optional[ShowtimeSummary] = None
     created_at: datetime

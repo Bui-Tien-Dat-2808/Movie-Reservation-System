@@ -28,13 +28,29 @@ async def list_refunds(
     status_filter: Optional[str] = Query(
         None, alias="status", description="Filter by status (manual_required, success, processing, failed, all)"
     ),
+    payment_method_filter: Optional[str] = Query(
+        None, alias="payment_method", description="Filter by payment method (cash, vnpay, all)"
+    ),
+    start_date: Optional[str] = Query(
+        None, alias="start_date", description="Filter by start date (YYYY-MM-DD)"
+    ),
+    end_date: Optional[str] = Query(
+        None, alias="end_date", description="Filter by end date (YYYY-MM-DD)"
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     current_user: User = Depends(require_admin),
     service: RefundService = Depends(get_refund_service),
 ):
-    """Admin: List all refund transactions with optional status filtering."""
-    items, total = await service.list_refunds(status_filter=status_filter, page=page, page_size=page_size)
+    """Admin: List all refund transactions and cancelled reservations with optional filtering."""
+    items, total = await service.list_refunds(
+        status_filter=status_filter,
+        payment_method_filter=payment_method_filter,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+    )
     total_pages = (total + page_size - 1) // page_size if total > 0 else 1
 
     return RefundListResponse(

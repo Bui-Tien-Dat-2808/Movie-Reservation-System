@@ -381,6 +381,7 @@ async def test_confirm_auto_schedule_skips_rooms_with_zero_active_seats():
 
     mock_db = AsyncMock()
     mock_db.add = MagicMock()
+    mock_db.add = MagicMock()
     mock_db.add_all = MagicMock()
     mock_cache = AsyncMock()
     service = ShowtimeService(mock_db, mock_cache)
@@ -428,4 +429,45 @@ async def test_confirm_auto_schedule_skips_rooms_with_zero_active_seats():
     assert skipped[0]["room_id"] == 2
     assert skipped[0]["room_name"] == "Empty Room"
     assert "Phòng không có ghế đang hoạt động" in skipped[0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_staggered_room_start_times(mock_db, mock_cache):
+    """Test that start times across different rooms are staggered by 15 minutes by default."""
+    service = ShowtimeService(mock_db, mock_cache)
+
+    movie = Movie(id=1, title="Action Movie", duration_minutes=120, status=MovieStatus.NOW_SHOWING, is_active=True)
+    movie.movie_genres = []
+
+    room1 = Room(id=1, name="Standard 1", room_type=RoomType.STANDARD, is_active=True)
+    room2 = Room(id=2, name="Standard 2", room_type=RoomType.STANDARD, is_active=True)
+
+    mock_db.execute.side_effect = [
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [movie])),
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [room1, room2])),
+    ]
+
+    start_d_str = (date.today() + timedelta(days=1)).isoformat()
+    req = AutoScheduleRequest(
+        start_date=start_d_str,
+        end_date=start_d_str,
+        room_ids=[1, 2],
+        movie_ids=[1],
+        base_price=Decimal("90000"),
+        vip_price=Decimal("120000"),
+        start_time_str="10:00",
+        end_time_str="14:00",
+        stagger_interval_minutes=15,
+    )
+
+    proposed = await service.generate_auto_schedule_preview(req)
+
+    room1_starts = [item.start_time for item in proposed if item.room_id == 1]
+    room2_starts = [item.start_time for item in proposed if item.room_id == 2]
+
+    assert len(room1_starts) > 0
+    assert len(room2_starts) > 0
+    # Room 2 first showtime start_time must be exactly 15 minutes after Room 1 first showtime
+    diff_minutes = (room2_starts[0] - room1_starts[0]).total_seconds() / 60.0
+    assert diff_minutes == 15.0
 
