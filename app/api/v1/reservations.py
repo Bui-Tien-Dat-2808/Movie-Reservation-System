@@ -5,7 +5,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_current_active_user, get_db, get_redis, require_admin
+from app.dependencies import get_current_active_user, get_db, get_redis, require_admin, require_staff_or_admin
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.schemas.reservation import (
@@ -275,7 +275,7 @@ async def verify_ticket(
     return await service.verify_ticket(body.ticket_code)
 
 
-@router.post("/check-in", summary="Staff check-in ticket (mark as used)")
+@router.post("/check-in", summary="Check-in ticket (mark as used)")
 async def check_in_ticket(
     body: TicketVerifyRequest,
     current_user: User = Depends(require_admin),

@@ -271,7 +271,8 @@ class ReservationService:
                 f"Vé chỉ có thể hủy trước giờ chiếu tối thiểu {min_mins} phút."
             )
 
-        # Free up the seats
+        # Free up the seats and add back to DB session
+        freed_seat_ids = []
         for rs in reservation.reservation_seats:
             ss_result = await self.db.execute(
                 select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id)
@@ -281,6 +282,8 @@ class ReservationService:
                 ss.status = SeatStatus.AVAILABLE
                 ss.held_by = None
                 ss.held_until = None
+                self.db.add(ss)
+                freed_seat_ids.append(ss.seat_id)
 
         reservation.status = ReservationStatus.CANCELLED
         # Save cancellation reason into reservation notes
@@ -288,6 +291,21 @@ class ReservationService:
         reason_note = f"Lý do hủy: {cancel_reason}"
         reservation.notes = f"{existing_notes} | {reason_note}" if (existing_notes and "Lý do hủy:" not in existing_notes) else (reason_note if not existing_notes else existing_notes)
         await self.db.flush()
+
+        # Invalidate cached seat map for this showtime
+        if reservation.showtime_id:
+            await self.cache.delete_pattern(f"showtimes:seats:{reservation.showtime_id}")
+
+            # Broadcast real-time SEATS_RELEASED event
+            try:
+                from app.websocket.seat_manager import seat_connection_manager
+                await seat_connection_manager.broadcast(
+                    showtime_id=reservation.showtime_id,
+                    event_type="SEATS_RELEASED",
+                    data={"seat_ids": freed_seat_ids}
+                )
+            except Exception as e:
+                logger.warning("Failed to broadcast SEATS_RELEASED event", error=str(e))
 
         # Create refund request if ticket was paid via VNPay or create record for Cash
         from app.models.payment import PaymentTransaction
@@ -528,18 +546,92 @@ class ReservationService:
     async def get_reservation_by_code(self, ticket_code: str) -> Optional[Reservation]:
         """Fetch reservation by ticket code with full relationships loaded."""
         from sqlalchemy.orm import selectinload
+        from sqlalchemy import func
+        import re
+
+        clean_code = (ticket_code or "").strip().upper()
+        if not clean_code:
+            return None
+
+        options = [
+            selectinload(Reservation.user),
+            selectinload(Reservation.showtime).selectinload(Showtime.movie),
+            selectinload(Reservation.showtime).selectinload(Showtime.room),
+            selectinload(Reservation.reservation_seats).selectinload(ReservationSeat.showtime_seat).selectinload(ShowtimeSeat.seat),
+        ]
+
+        # Generate 0 / O variants to prevent O vs 0 typos
+        v1 = clean_code
+        v2 = clean_code.replace("0", "O")
+        v3 = clean_code.replace("O", "0")
+        variants = list(set([v1, v2, v3]))
+
+        # 1. Match ticket_code column (case-insensitive + 0/O typo tolerance)
         stmt = (
             select(Reservation)
-            .where(Reservation.ticket_code == ticket_code.strip())
-            .options(
-                selectinload(Reservation.user),
-                selectinload(Reservation.showtime).selectinload(Showtime.movie),
-                selectinload(Reservation.showtime).selectinload(Showtime.room),
-                selectinload(Reservation.reservation_seats).selectinload(ReservationSeat.showtime_seat).selectinload(ShowtimeSeat.seat),
-            )
+            .where(func.upper(Reservation.ticket_code).in_(variants))
+            .options(*options)
         )
         res = await self.db.execute(stmt)
-        return res.scalar_one_or_none()
+        reservation = res.scalar_one_or_none()
+        if reservation:
+            return reservation
+
+        # 2. Match ID if user/staff typed #67 or 67
+        id_match = re.search(r"\d+", clean_code)
+        if id_match:
+            try:
+                res_id = int(id_match.group())
+                stmt_id = select(Reservation).where(Reservation.id == res_id).options(*options)
+                res_by_id = await self.db.execute(stmt_id)
+                r_by_id = res_by_id.scalar_one_or_none()
+                if r_by_id:
+                    return r_by_id
+            except ValueError:
+                pass
+
+        return None
+
+    def _serialize_reservation(self, r: Reservation) -> dict:
+        """Serialize reservation to dict for staff scanner responses."""
+        seats = []
+        for rs in (r.reservation_seats or []):
+            label = None
+            if rs.showtime_seat and rs.showtime_seat.seat:
+                s = rs.showtime_seat.seat
+                label = f"{s.row_label}{s.col_number}"
+            seats.append({
+                "id": rs.id,
+                "price": float(rs.price) if rs.price else 0,
+                "seat_label": label,
+                "row_label": rs.showtime_seat.seat.row_label if (rs.showtime_seat and rs.showtime_seat.seat) else None,
+                "col_number": rs.showtime_seat.seat.col_number if (rs.showtime_seat and rs.showtime_seat.seat) else None,
+            })
+
+        st = r.showtime
+        showtime_data = None
+        if st:
+            showtime_data = {
+                "id": st.id,
+                "movie_title": st.movie.title if st.movie else None,
+                "poster_url": st.movie.poster_url if st.movie else None,
+                "room_name": st.room.name if st.room else None,
+                "start_time": st.start_time.isoformat() if st.start_time else None,
+            }
+
+        return {
+            "id": r.id,
+            "ticket_code": r.ticket_code or f"CVN-{r.id}",
+            "total_price": float(r.total_price) if r.total_price else 0,
+            "status": r.status.value if hasattr(r.status, "value") else str(r.status),
+            "payment_method": r.payment_method or "vnpay",
+            "is_used": r.is_used,
+            "checked_in_at": r.checked_in_at.strftime('%H:%M %d/%m/%Y') if r.checked_in_at else None,
+            "user_email": r.user.email if r.user else None,
+            "user_full_name": r.user.full_name if r.user else None,
+            "showtime": showtime_data,
+            "reservation_seats": seats,
+        }
 
     async def verify_ticket(self, ticket_code: str) -> dict:
         """Verify ticket validity for staff scanner."""
@@ -547,12 +639,14 @@ class ReservationService:
         if not reservation:
             return {"valid": False, "status_code": "NOT_FOUND", "message": f"Mã vé '{ticket_code}' không tồn tại trên hệ thống!"}
 
+        serialized = self._serialize_reservation(reservation)
+
         if reservation.status == ReservationStatus.CANCELLED:
             return {
                 "valid": False,
                 "status_code": "CANCELLED",
                 "message": "Vé này đã bị HỦY trước đó!",
-                "reservation": ReservationResponse.model_validate(reservation),
+                "reservation": serialized,
             }
 
         if reservation.is_used:
@@ -560,14 +654,14 @@ class ReservationService:
                 "valid": False,
                 "status_code": "CHECKED_IN",
                 "message": f"Vé này ĐÃ ĐƯỢC QUÉT VÀO RẠP lúc {reservation.checked_in_at.strftime('%H:%M %d/%m/%Y') if reservation.checked_in_at else 'N/A'}!",
-                "reservation": ReservationResponse.model_validate(reservation),
+                "reservation": serialized,
             }
 
         return {
             "valid": True,
             "status_code": "VALID",
             "message": "Vé HỢP LỆ! Sẵn sàng check-in cho khán giả.",
-            "reservation": ReservationResponse.model_validate(reservation),
+            "reservation": serialized,
         }
 
     async def check_in_ticket(self, ticket_code: str) -> dict:
@@ -591,7 +685,7 @@ class ReservationService:
         return {
             "success": True,
             "message": "✅ Check-in vé thành công! Khán giả đã vào rạp.",
-            "reservation": ReservationResponse.model_validate(reservation),
+            "reservation": self._serialize_reservation(reservation),
         }
 
     async def confirm_payment_success(
@@ -702,6 +796,17 @@ class ReservationService:
         await self.db.commit()
         await self.db.refresh(reservation)
 
+        # Broadcast real-time SEATS_BOOKED event to all clients on this showtime
+        try:
+            from app.websocket.seat_manager import seat_connection_manager
+            await seat_connection_manager.broadcast(
+                showtime_id=reservation.showtime_id,
+                event_type="SEATS_BOOKED",
+                data={"seat_ids": [rs.showtime_seat_id for rs in r_seats]}
+            )
+        except Exception as e:
+            logger.warning("Failed to broadcast real-time SEATS_BOOKED event", error=str(e))
+
         # 5. Dispatch Automated Ticket Email with Barcode (Thread-safe)
         try:
             user_res = await self.db.execute(select(User).where(User.id == reservation.user_id))
@@ -753,17 +858,31 @@ class ReservationService:
         )
         r_seats = rs_result.scalars().all()
         seat_ids = [rs.showtime_seat_id for rs in r_seats]
+        freed_seat_ids = []
 
         if seat_ids:
             st_seats_result = await self.db.execute(
                 select(ShowtimeSeat).where(ShowtimeSeat.id.in_(seat_ids))
             )
             for ss in st_seats_result.scalars().all():
-                if ss.status != SeatStatus.BOOKED:
-                    ss.status = SeatStatus.AVAILABLE
-                    ss.held_by = None
-                    ss.held_until = None
-                    self.db.add(ss)
+                ss.status = SeatStatus.AVAILABLE
+                ss.held_by = None
+                ss.held_until = None
+                self.db.add(ss)
+                freed_seat_ids.append(ss.seat_id)
+
+        # Invalidate cached seat map & broadcast real-time event
+        if reservation.showtime_id:
+            await self.cache.delete_pattern(f"showtimes:seats:{reservation.showtime_id}")
+            try:
+                from app.websocket.seat_manager import seat_connection_manager
+                await seat_connection_manager.broadcast(
+                    showtime_id=reservation.showtime_id,
+                    event_type="SEATS_RELEASED",
+                    data={"seat_ids": freed_seat_ids}
+                )
+            except Exception as e:
+                logger.warning("Failed to broadcast SEATS_RELEASED event", error=str(e))
 
         # Record failed transaction if vnp_params provided
         if vnp_params:
@@ -797,8 +916,8 @@ class ReservationService:
 
     async def cleanup_expired_pending_reservations(self) -> int:
         """
-        Cancel all PENDING reservations that have passed their 15-minute hold window.
-        Returns the number of cancelled reservations.
+        1. Cancel PENDING reservations past their hold window.
+        2. Release any HELD seats whose held_until has passed.
         """
         now = datetime.now(timezone.utc)
         cutoff_time = now - timedelta(minutes=15)
@@ -818,5 +937,36 @@ class ReservationService:
                 count += 1
             except Exception as e:
                 logger.error("cleanup_pending_reservation_failed", reservation_id=res.id, error=str(e))
+
+        # Also release standalone expired HELD seats
+        expired_seats_stmt = select(ShowtimeSeat).where(
+            ShowtimeSeat.status == SeatStatus.HELD,
+            ShowtimeSeat.held_until < now
+        )
+        expired_seats = (await self.db.execute(expired_seats_stmt)).scalars().all()
+        st_seat_map: dict[int, list[int]] = {}
+
+        for ss in expired_seats:
+            ss.status = SeatStatus.AVAILABLE
+            ss.held_by = None
+            ss.held_until = None
+            self.db.add(ss)
+            if ss.showtime_id not in st_seat_map:
+                st_seat_map[ss.showtime_id] = []
+            st_seat_map[ss.showtime_id].append(ss.seat_id)
+
+        if expired_seats:
+            await self.db.commit()
+            for st_id, freed_ids in st_seat_map.items():
+                await self.cache.delete_pattern(f"showtimes:seats:{st_id}")
+                try:
+                    from app.websocket.seat_manager import seat_connection_manager
+                    await seat_connection_manager.broadcast(
+                        showtime_id=st_id,
+                        event_type="SEATS_RELEASED",
+                        data={"seat_ids": freed_ids}
+                    )
+                except Exception:
+                    pass
 
         return count

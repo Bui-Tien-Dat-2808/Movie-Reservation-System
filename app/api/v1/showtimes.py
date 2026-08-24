@@ -1,10 +1,11 @@
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_active_user, get_db, get_redis, require_admin
+from app.websocket.seat_manager import seat_connection_manager
 from app.schemas.common import PaginatedResponse
 from app.schemas.showtime import (
     ShowtimeCreate,
@@ -319,8 +320,86 @@ async def hold_seats(
         ss.held_until = held_until
 
     await db.flush()
+
+    # Real-time Broadcast: Notify all connected clients that these seats were held
+    await seat_connection_manager.broadcast(
+        showtime_id=showtime_id,
+        event_type="SEATS_HELD",
+        data={
+            "seat_ids": data.seat_ids,
+            "held_by_user_id": user.id,
+            "held_until": held_until.isoformat(),
+        }
+    )
+
     return SeatHoldResponse(
         showtime_id=showtime_id,
         seat_ids=data.seat_ids,
         held_until=held_until,
     )
+
+
+@router.post("/{showtime_id}/release-seats", summary="Release held seats (User)")
+async def release_seats(
+    showtime_id: int,
+    data: SeatHoldRequest,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+    user=Depends(get_current_active_user),
+):
+    """
+    Release seats held by the current user when cancelling booking or leaving checkout.
+    """
+    from sqlalchemy import select
+    from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+
+    result = await db.execute(
+        select(ShowtimeSeat).where(
+            ShowtimeSeat.showtime_id == showtime_id,
+            ShowtimeSeat.seat_id.in_(data.seat_ids),
+        )
+    )
+    seats = result.scalars().all()
+    freed_seat_ids = []
+
+    for ss in seats:
+        if ss.held_by == user.id or getattr(user, "role", None) == "admin":
+            if ss.status != SeatStatus.BOOKED:
+                ss.status = SeatStatus.AVAILABLE
+                ss.held_by = None
+                ss.held_until = None
+                db.add(ss)
+                freed_seat_ids.append(ss.seat_id)
+
+    await db.commit()
+
+    # Clear Redis Cache
+    cache = CacheService(redis)
+    await cache.delete_pattern(f"showtimes:seats:{showtime_id}")
+
+    # Broadcast real-time SEATS_RELEASED event to WebSockets
+    if freed_seat_ids:
+        await seat_connection_manager.broadcast(
+            showtime_id=showtime_id,
+            event_type="SEATS_RELEASED",
+            data={"seat_ids": freed_seat_ids}
+        )
+
+    return {"success": True, "released_seat_ids": freed_seat_ids}
+
+
+@router.websocket("/ws/{showtime_id}")
+async def showtime_seat_websocket(websocket: WebSocket, showtime_id: int):
+    """
+    WebSocket endpoint for real-time seat map synchronization.
+    Clients connect to this WS when viewing a showtime seat map.
+    """
+    await seat_connection_manager.connect(showtime_id, websocket)
+    try:
+        while True:
+            # Keep connection alive & listen for client ping/messages
+            _ = await websocket.receive_text()
+    except WebSocketDisconnect:
+        seat_connection_manager.disconnect(showtime_id, websocket)
+    except Exception:
+        seat_connection_manager.disconnect(showtime_id, websocket)

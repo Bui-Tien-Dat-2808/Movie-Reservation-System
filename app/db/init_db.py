@@ -38,27 +38,41 @@ async def _migrate_schema() -> None:
 
 
 async def _seed_admin() -> None:
-    """Create initial admin user if not exists."""
+    """Create initial admin and staff users if not exist."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(User).where(User.email == settings.ADMIN_EMAIL)
         )
         existing_admin = result.scalar_one_or_none()
 
-        if existing_admin:
+        if not existing_admin:
+            admin = User(
+                email=settings.ADMIN_EMAIL,
+                hashed_password=get_password_hash(settings.ADMIN_PASSWORD),
+                full_name=settings.ADMIN_FULL_NAME,
+                role=UserRole.ADMIN,
+                is_active=True,
+            )
+            db.add(admin)
+            await db.commit()
+            logger.info("Admin user created", email=settings.ADMIN_EMAIL)
+        else:
             logger.info("Admin user already exists", email=settings.ADMIN_EMAIL)
-            return
 
-        admin = User(
-            email=settings.ADMIN_EMAIL,
-            hashed_password=get_password_hash(settings.ADMIN_PASSWORD),
-            full_name=settings.ADMIN_FULL_NAME,
-            role=UserRole.ADMIN,
-            is_active=True,
-        )
-        db.add(admin)
-        await db.commit()
-        logger.info("Admin user created", email=settings.ADMIN_EMAIL)
+        # Seed default Staff user for ticket scanning
+        staff_email = "staff@moviereservation.com"
+        staff_res = await db.execute(select(User).where(User.email == staff_email))
+        if not staff_res.scalar_one_or_none():
+            staff_user = User(
+                email=staff_email,
+                hashed_password=get_password_hash("Staff@123456"),
+                full_name="Nhân Viên Soát Vé Rạp",
+                role=UserRole.STAFF,
+                is_active=True,
+            )
+            db.add(staff_user)
+            await db.commit()
+            logger.info("Staff user created", email=staff_email)
 
 
 async def _seed_rooms() -> None:

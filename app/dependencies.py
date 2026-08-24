@@ -114,6 +114,16 @@ async def require_admin(current_user=Depends(get_current_user)):
     return current_user
 
 
+async def require_staff_or_admin(current_user=Depends(get_current_user)):
+    """Require staff or admin role for ticket check-in and operational tasks."""
+    if current_user.role not in (UserRole.ADMIN, UserRole.STAFF, "admin", "staff"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Staff or Admin access required",
+        )
+    return current_user
+
+
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),

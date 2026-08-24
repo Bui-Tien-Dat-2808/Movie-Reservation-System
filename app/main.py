@@ -74,6 +74,12 @@ async def lifespan(app: FastAPI):
     # Initialize database (create tables + seed admin)
     await init_db()
 
+    # Initialize Redis Pub/Sub for SeatConnectionManager
+    from app.dependencies import get_redis
+    redis_client = await get_redis()
+    from app.websocket.seat_manager import seat_connection_manager
+    await seat_connection_manager.init_redis(redis_client)
+
     # Start periodic background tasks
     cleanup_task = asyncio.create_task(periodic_reservation_cleanup())
     movie_sync_task = asyncio.create_task(periodic_movie_sync())

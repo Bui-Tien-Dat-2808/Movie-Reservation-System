@@ -78,9 +78,14 @@ class MovieService:
             has_any_st = m.id in has_any_showtime_movie_ids
             old_status = m.status
 
+            if m.status == MovieStatus.ENDED:
+                continue
+
             if m.release_date and m.release_date > today:
                 m.status = MovieStatus.COMING_SOON
-            elif m.status == MovieStatus.ENDED:
+            elif has_any_st and not has_future_st:
+                m.status = MovieStatus.ENDED
+            elif not has_any_st and m.release_date and m.release_date < (today - timedelta(days=30)):
                 m.status = MovieStatus.ENDED
             else:
                 m.status = MovieStatus.NOW_SHOWING
