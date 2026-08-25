@@ -193,17 +193,23 @@ async def bulk_cancel_showtimes(
     if payload:
         s_ids = payload.showtime_ids
         m_id = payload.movie_id
+        m_ids = payload.movie_ids
         r_id = payload.room_id
+        r_ids = payload.room_ids
         upcoming = payload.only_upcoming
     else:
         s_ids = [int(i.strip()) for i in showtime_ids.split(",") if i.strip()] if showtime_ids else None
         m_id = movie_id
+        m_ids = None
         r_id = room_id
+        r_ids = None
         upcoming = only_upcoming
 
     count = await service.bulk_cancel_showtimes(
         movie_id=m_id,
+        movie_ids=m_ids,
         room_id=r_id,
+        room_ids=r_ids,
         only_upcoming=upcoming,
         showtime_ids=s_ids,
     )

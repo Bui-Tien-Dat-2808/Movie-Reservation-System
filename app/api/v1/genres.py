@@ -5,24 +5,41 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_db, require_admin
+from app.dependencies import get_db, get_redis, require_admin
 from app.models.genre import Genre
 from app.schemas.common import PaginatedResponse
 from app.schemas.genre import GenreCreate, GenreResponse, GenreUpdate
+from app.services.cache_service import CacheService
 from app.utils.pagination import PaginationParams, paginate
 
 router = APIRouter(prefix="/genres", tags=["Genres"])
 logger = structlog.get_logger()
+
+CACHE_KEY_GENRES = "genres:all"
 
 
 from app.utils.genre_utils import normalize_genre_name
 
 
 @router.get("/", response_model=List[GenreResponse], summary="List all genres")
-async def list_genres(db: AsyncSession = Depends(get_db)):
-    """Get all genres (cached)."""
+async def list_genres(
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Get all genres (Redis cached)."""
+    cache = CacheService(redis)
+    cached = await cache.get(CACHE_KEY_GENRES)
+    if cached and isinstance(cached, list):
+        return cached
+
     result = await db.execute(select(Genre).order_by(Genre.name))
-    return result.scalars().all()
+    genres = result.scalars().all()
+    genres_data = [
+        {"id": g.id, "name": g.name, "description": g.description, "created_at": g.created_at.isoformat() if g.created_at else None}
+        for g in genres
+    ]
+    await cache.set(CACHE_KEY_GENRES, genres_data, ttl=3600)
+    return genres
 
 
 @router.get("/{genre_id}", response_model=GenreResponse, summary="Get genre by ID")
@@ -44,6 +61,7 @@ async def get_genre(genre_id: int, db: AsyncSession = Depends(get_db)):
 async def create_genre(
     data: GenreCreate,
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     _=Depends(require_admin),
 ):
     """Admin: create a new genre."""
@@ -59,6 +77,7 @@ async def create_genre(
     db.add(genre)
     await db.flush()
     await db.refresh(genre)
+    await CacheService(redis).delete(CACHE_KEY_GENRES)
     return genre
 
 
@@ -67,6 +86,7 @@ async def update_genre(
     genre_id: int,
     data: GenreUpdate,
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     _=Depends(require_admin),
 ):
     """Admin: update a genre."""
@@ -94,6 +114,7 @@ async def update_genre(
 
     await db.flush()
     await db.refresh(genre)
+    await CacheService(redis).delete(CACHE_KEY_GENRES)
     return genre
 
 
@@ -105,6 +126,7 @@ async def update_genre(
 async def delete_genre(
     genre_id: int,
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     _=Depends(require_admin),
 ):
     """Admin: delete a genre."""
@@ -116,3 +138,4 @@ async def delete_genre(
 
     await db.delete(genre)
     await db.flush()
+    await CacheService(redis).delete(CACHE_KEY_GENRES)

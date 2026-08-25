@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.dependencies import get_db, require_admin
+from app.dependencies import get_db, get_redis, require_admin
 from app.models.seat import Seat, SeatType
 from app.models.room import Room
 from app.models.showtime import Showtime, ShowtimeStatus
@@ -18,9 +18,12 @@ from app.schemas.room import (
     RoomCreate, RoomDetailResponse, RoomResponse, RoomUpdate,
     RoomStatusResponse, ActiveShowtimeInfo, SeatStatusItem,
 )
+from app.services.cache_service import CacheService
 
 router = APIRouter(prefix="/rooms", tags=["Rooms"])
 logger = structlog.get_logger()
+
+CACHE_KEY_ROOMS_PREFIX = "rooms:list"
 
 
 async def _generate_seats(db: AsyncSession, room: Room, couple_rows: int = 1) -> None:
@@ -97,14 +100,30 @@ from app.models.room import Room, RoomType
 async def list_rooms(
     room_type: Optional[RoomType] = None,
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
 ):
-    """Get all active screening rooms."""
+    """Get all active screening rooms (Redis cached)."""
+    cache = CacheService(redis)
+    type_str = room_type.value if room_type else "all"
+    cache_key = f"{CACHE_KEY_ROOMS_PREFIX}:{type_str}"
+
+    cached = await cache.get(cache_key)
+    if cached and isinstance(cached, list):
+        return cached
+
     query = select(Room).where(Room.is_active == True).options(selectinload(Room.seats))
     if room_type:
         query = query.where(Room.room_type == room_type)
     query = query.order_by(Room.room_type, Room.room_number)
     result = await db.execute(query)
-    return result.scalars().all()
+    rooms = result.scalars().all()
+
+    rooms_data = [
+        RoomResponse.model_validate(r).model_dump(mode="json")
+        for r in rooms
+    ]
+    await cache.set(cache_key, rooms_data, ttl=3600)
+    return rooms
 
 
 @router.get("/{room_id}", response_model=RoomDetailResponse, summary="Get room with seat layout")
@@ -254,6 +273,7 @@ async def get_room_status(room_id: int, db: AsyncSession = Depends(get_db)):
 async def create_room(
     data: RoomCreate,
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     _=Depends(require_admin),
 ):
     """
@@ -312,6 +332,7 @@ async def create_room(
     await _generate_seats(db, room)
 
     await db.refresh(room)
+    await CacheService(redis).delete_pattern("rooms:*")
     result = await db.execute(
         select(Room)
         .where(Room.id == room.id)
@@ -325,6 +346,7 @@ async def update_room(
     room_id: int,
     data: RoomUpdate,
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     _=Depends(require_admin),
 ):
     """Admin: update screening room details."""
@@ -344,6 +366,7 @@ async def update_room(
 
     await db.flush()
     await db.refresh(room)
+    await CacheService(redis).delete_pattern("rooms:*")
     return room
 
 
@@ -351,6 +374,7 @@ async def update_room(
 async def delete_room(
     room_id: int,
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     _=Depends(require_admin),
 ):
     """
@@ -387,10 +411,12 @@ async def delete_room(
     if has_history:
         room.is_active = False
         await db.flush()
+        await CacheService(redis).delete_pattern("rooms:*")
         return {"message": f"Đã ẩn phòng '{room.name}' khỏi hệ thống."}
     else:
         await db.delete(room)
         await db.flush()
+        await CacheService(redis).delete_pattern("rooms:*")
         return {"message": f"Đã xóa hoàn toàn phòng '{room.name}'."}
 
 
@@ -404,6 +430,7 @@ async def update_room_seats(
     room_id: int,
     updates: List[SeatUpdateItem],
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
     _=Depends(require_admin),
 ):
     """Admin: Update individual seat types in a screening room layout."""
@@ -424,6 +451,7 @@ async def update_room_seats(
             seat.width = 2 if item.seat_type == SeatType.COUPLE else 1
 
     await db.commit()
+    await CacheService(redis).delete_pattern("rooms:*")
 
     refreshed = await db.execute(
         select(Room).where(Room.id == room_id).options(selectinload(Room.seats))

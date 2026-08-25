@@ -12,7 +12,7 @@ from app.db.base import Base
 class PointTransaction(Base):
     __tablename__ = "point_transactions"
 
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     reservation_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("reservations.id", ondelete="SET NULL"), nullable=True
     )

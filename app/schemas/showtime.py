@@ -128,5 +128,7 @@ class AutoScheduleConfirmRequest(BaseModel):
 class BulkCancelShowtimesRequest(BaseModel):
     showtime_ids: Optional[List[int]] = None
     movie_id: Optional[int] = None
+    movie_ids: Optional[List[int]] = None
     room_id: Optional[int] = None
+    room_ids: Optional[List[int]] = None
     only_upcoming: bool = True

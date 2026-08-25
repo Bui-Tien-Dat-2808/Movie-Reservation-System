@@ -12,7 +12,7 @@ class PaymentTransaction(Base):
     __tablename__ = "payment_transactions"
 
     reservation_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("reservations.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey("reservations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     payment_method: Mapped[str] = mapped_column(String(50), default="vnpay", nullable=False)

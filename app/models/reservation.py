@@ -36,7 +36,7 @@ class Reservation(Base):
     checked_in_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     exchanged_from_reservation_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("reservations.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey("reservations.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
     # Relationships

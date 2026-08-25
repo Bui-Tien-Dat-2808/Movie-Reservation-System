@@ -398,6 +398,7 @@ async def test_confirm_auto_schedule_skips_rooms_with_zero_active_seats():
     mock_db.execute.side_effect = [
         MagicMock(scalars=lambda: MagicMock(all=lambda: [])),  # clean_stmt (old showtimes)
         MagicMock(scalars=lambda: MagicMock(all=lambda: [room_with_seats, room_empty])),  # rooms_res
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [])),  # movie status update res
     ]
 
     now = datetime.now(timezone.utc)

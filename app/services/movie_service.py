@@ -78,16 +78,20 @@ class MovieService:
             has_any_st = m.id in has_any_showtime_movie_ids
             old_status = m.status
 
-            if m.status == MovieStatus.ENDED:
-                continue
-
-            if m.release_date and m.release_date > today:
+            if has_future_st:
+                # Has scheduled upcoming showtimes -> MUST be NOW_SHOWING
+                m.status = MovieStatus.NOW_SHOWING
+            elif m.release_date and m.release_date > today:
+                # Release date in future and no future showtimes yet -> COMING_SOON
                 m.status = MovieStatus.COMING_SOON
-            elif has_any_st and not has_future_st:
+            elif has_any_st and not has_future_st and m.release_date and m.release_date < (today - timedelta(days=30)):
+                # Has past showtimes, no upcoming showtimes, released > 30 days ago -> ENDED
                 m.status = MovieStatus.ENDED
-            elif not has_any_st and m.release_date and m.release_date < (today - timedelta(days=30)):
+            elif not has_any_st and m.release_date and m.release_date < (today - timedelta(days=60)):
+                # Never had showtimes and released > 60 days ago -> ENDED
                 m.status = MovieStatus.ENDED
             else:
+                # Within active theatrical window (<= 30 days from release or active) -> NOW_SHOWING
                 m.status = MovieStatus.NOW_SHOWING
 
             if m.status != old_status:

@@ -281,7 +281,9 @@ class ShowtimeService:
     async def bulk_cancel_showtimes(
         self,
         movie_id: Optional[int] = None,
+        movie_ids: Optional[List[int]] = None,
         room_id: Optional[int] = None,
+        room_ids: Optional[List[int]] = None,
         only_upcoming: bool = True,
         showtime_ids: Optional[List[int]] = None,
     ) -> int:
@@ -293,9 +295,13 @@ class ShowtimeService:
 
         if showtime_ids:
             query = query.where(Showtime.id.in_(showtime_ids))
-        if movie_id:
+        if movie_ids:
+            query = query.where(Showtime.movie_id.in_(movie_ids))
+        elif movie_id:
             query = query.where(Showtime.movie_id == movie_id)
-        if room_id:
+        if room_ids:
+            query = query.where(Showtime.room_id.in_(room_ids))
+        elif room_id:
             query = query.where(Showtime.room_id == room_id)
         if only_upcoming:
             # Preserve past and currently playing showtimes
@@ -310,7 +316,8 @@ class ShowtimeService:
 
         await self.db.commit()
         await self.cache.delete_pattern("showtimes:*")
-        logger.info("Bulk showtimes cancelled", count=count, movie_id=movie_id, room_id=room_id, only_upcoming=only_upcoming)
+        await self.cache.delete_pattern("movies:*")
+        logger.info("Bulk showtimes cancelled", count=count, movie_id=movie_id, movie_ids=movie_ids, room_id=room_id, room_ids=room_ids, only_upcoming=only_upcoming)
         return count
 
     async def get_seat_map(self, showtime_id: int) -> dict:
@@ -417,17 +424,9 @@ class ShowtimeService:
                 selectinload(Movie.movie_genres).selectinload(MovieGenre.genre)
             )
         )
-        movie_query = (
-            select(Movie)
-            .where(Movie.is_active == True)
-            .options(
-                selectinload(Movie.movie_genres).selectinload(MovieGenre.genre)
-            )
-        )
         if req.movie_ids:
             movie_query = movie_query.where(
                 Movie.id.in_(req.movie_ids),
-                Movie.status.in_([MovieStatus.NOW_SHOWING, MovieStatus.COMING_SOON]),
             )
         else:
             movie_query = movie_query.where(
@@ -496,7 +495,11 @@ class ShowtimeService:
         curr_d = start_d
         while curr_d <= end_d:
             # A1: Filter candidate movies whose release_date has arrived on or before curr_d
-            day_movies = [m for m in movies if not m.release_date or m.release_date <= curr_d]
+            if req.movie_ids:
+                day_movies = list(movies)
+            else:
+                day_movies = [m for m in movies if not m.release_date or m.release_date <= curr_d]
+
             if not day_movies:
                 # Do NOT fallback to all movies; skip the day if no movies released
                 curr_d += timedelta(days=1)
@@ -795,7 +798,19 @@ class ShowtimeService:
             self.db.add_all(showtime_seats)
             count += 1
 
+        # Automatically ensure any scheduled movies are active NOW_SHOWING
+        if count > 0:
+            scheduled_movie_ids = list({item.movie_id for item in showtimes_data})
+            if scheduled_movie_ids:
+                m_res = await self.db.execute(
+                    select(Movie).where(Movie.id.in_(scheduled_movie_ids))
+                )
+                for m in m_res.scalars().all():
+                    if m.status != MovieStatus.NOW_SHOWING:
+                        m.status = MovieStatus.NOW_SHOWING
+
         await self.db.commit()
         await self.cache.delete_pattern("showtimes:*")
+        await self.cache.delete_pattern("movies:*")
         logger.info("Auto-scheduled showtimes committed", total=count, skipped=len(skipped))
         return count, skipped
