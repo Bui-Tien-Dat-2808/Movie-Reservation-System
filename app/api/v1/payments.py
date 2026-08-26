@@ -218,7 +218,7 @@ class CashPaymentConfirmRequest(BaseModel):
 
 @router.post(
     "/cash-confirm",
-    summary="Xác nhận thanh toán bằng Tiền mặt tại rạp",
+    summary="Xác nhận thanh toán bằng Tiền mặt tại rạp (Chỉ dành cho Staff/Admin)",
 )
 async def confirm_cash_payment(
     req: CashPaymentConfirmRequest,
@@ -226,19 +226,23 @@ async def confirm_cash_payment(
     service: ReservationService = Depends(get_reservation_service),
 ):
     """
-    Xác nhận thanh toán tiền mặt tại rạp chiếu cho đơn đặt vé ở trạng thái PENDING.
+    Xác nhận thanh toán tiền mặt tại rạp chiếu.
+    **Chỉ Admin hoặc Staff** mới có quyền xác nhận, tránh user tự confirm để trốn thanh toán.
     """
+    from app.models.user import UserRole
+
+    # SEC-02: Chỉ Admin hoặc Staff mới được xác nhận cash payment
+    if current_user.role not in (UserRole.ADMIN, UserRole.STAFF):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ nhân viên hoặc quản trị viên mới có quyền xác nhận thanh toán tiền mặt.",
+        )
+
     reservation = await service.get_reservation(req.reservation_id)
     if not reservation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Không tìm thấy đơn đặt vé",
-        )
-
-    if reservation.user_id != current_user.id and current_user.role.value != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Bạn không có quyền thanh toán đơn đặt vé này",
         )
 
     if reservation.status == ReservationStatus.CONFIRMED:
@@ -251,5 +255,54 @@ async def confirm_cash_payment(
         )
 
     await service.confirm_payment_success(req.reservation_id, {}, payment_method="cash")
-    logger.info("cash_payment_confirmed", reservation_id=req.reservation_id, user_id=current_user.id)
+    logger.info("cash_payment_confirmed", reservation_id=req.reservation_id, confirmed_by=current_user.id)
     return {"status": "success", "message": "Xác nhận thanh toán tiền mặt thành công", "reservation_id": req.reservation_id}
+
+
+@router.get(
+    "/my-transactions",
+    summary="Lấy lịch sử giao dịch thanh toán của người dùng hiện tại",
+)
+async def get_my_payment_transactions(
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """FEAT-02: Lấy danh sách giao dịch thanh toán của tài khoản."""
+    from app.models.payment import PaymentTransaction
+    from app.models.reservation import Reservation
+    from app.models.showtime import Showtime
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    stmt = (
+        select(PaymentTransaction)
+        .join(Reservation, PaymentTransaction.reservation_id == Reservation.id)
+        .where(Reservation.user_id == current_user.id)
+        .order_by(PaymentTransaction.created_at.desc())
+        .options(
+            selectinload(PaymentTransaction.reservation)
+            .selectinload(Reservation.showtime)
+            .selectinload(Showtime.movie),
+        )
+    )
+    res = await db.execute(stmt)
+    transactions = res.scalars().all()
+
+    return [
+        {
+            "id": tx.id,
+            "reservation_id": tx.reservation_id,
+            "ticket_code": tx.reservation.ticket_code if tx.reservation else f"CVN-{tx.reservation_id}",
+            "movie_title": tx.reservation.showtime.movie.title if (tx.reservation and tx.reservation.showtime and tx.reservation.showtime.movie) else "Phim CineVerse",
+            "amount": float(tx.amount),
+            "payment_method": tx.payment_method,
+            "bank_code": tx.bank_code,
+            "card_type": tx.card_type,
+            "transaction_no": tx.transaction_no,
+            "vnp_txn_ref": tx.vnp_txn_ref,
+            "status": tx.status,
+            "pay_date": tx.pay_date.isoformat() if tx.pay_date else tx.created_at.isoformat(),
+            "created_at": tx.created_at.isoformat(),
+        }
+        for tx in transactions
+    ]

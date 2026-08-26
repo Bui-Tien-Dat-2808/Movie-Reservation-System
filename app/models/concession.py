@@ -43,6 +43,7 @@ class ReservationConcession(Base):
     )
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    custom_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     reservation: Mapped["Reservation"] = relationship(  # noqa: F821
         "Reservation", back_populates="reservation_concessions"

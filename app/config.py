@@ -1,6 +1,6 @@
 from functools import lru_cache
 from typing import List
-
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     CINEMA_TIMEZONE: str = "Asia/Ho_Chi_Minh"
     MIN_MINUTES_BEFORE_CANCEL_OR_EXCHANGE: int = 30
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_field(cls, v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            v_lower = v.strip().lower()
+            if v_lower in ("1", "true", "yes", "t", "y", "debug", "dev", "development"):
+                return True
+            if v_lower in ("0", "false", "no", "f", "n", "release", "prod", "production", ""):
+                return False
+        return False
 
     # Database
     DATABASE_URL: str
@@ -58,7 +71,7 @@ class Settings(BaseSettings):
     TMDB_LANGUAGE: str = "vi-VN"
 
     # CORS & Base URLs
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:8080,http://localhost:5173,http://localhost:8443,http://127.0.0.1:3000,http://127.0.0.1:8080,http://127.0.0.1:5173,http://127.0.0.1:8443"
     FRONTEND_BASE_URL: str = "http://localhost:5173"
     BACKEND_BASE_URL: str = "http://localhost:8000"
 

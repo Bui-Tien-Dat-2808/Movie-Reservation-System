@@ -244,18 +244,38 @@ def _build_reservation_response(reservation) -> ReservationResponse:
     else:
         ticket_code = reservation.ticket_code
 
+    # Build concession items
+    concessions_list = []
+    if hasattr(reservation, "reservation_concessions") and reservation.reservation_concessions:
+        from app.schemas.concession import ReservationConcessionResponse
+        for rc in reservation.reservation_concessions:
+            c_name = rc.concession.name if (rc.concession and hasattr(rc.concession, "name")) else f"Combo #{rc.concession_id}"
+            concessions_list.append(
+                ReservationConcessionResponse(
+                    concession_id=rc.concession_id,
+                    quantity=rc.quantity,
+                    unit_price=rc.unit_price,
+                    concession_name=c_name,
+                    custom_options=rc.custom_options,
+                )
+            )
+
     return ReservationResponse(
         id=reservation.id,
         showtime_id=reservation.showtime_id,
         user_id=reservation.user_id,
         ticket_code=ticket_code,
         total_price=reservation.total_price,
+        voucher_code=reservation.voucher_code,
+        discount_amount=reservation.discount_amount,
         status=reservation.status,
         payment_method=reservation.payment_method,
         is_used=reservation.is_used,
         checked_in_at=reservation.checked_in_at,
         notes=reservation.notes,
+        exchanged_from_reservation_id=reservation.exchanged_from_reservation_id,
         reservation_seats=seats,
+        reservation_concessions=concessions_list,
         showtime=showtime_summary,
         created_at=reservation.created_at,
     )
@@ -268,7 +288,7 @@ class TicketVerifyRequest(BaseModel):
 @router.post("/verify-ticket", summary="Verify ticket validity by code or QR payload")
 async def verify_ticket(
     body: TicketVerifyRequest,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_staff_or_admin),
     service: ReservationService = Depends(get_reservation_service),
 ):
     """Verify if ticket is valid, cancelled, or already checked-in."""
@@ -278,7 +298,7 @@ async def verify_ticket(
 @router.post("/check-in", summary="Check-in ticket (mark as used)")
 async def check_in_ticket(
     body: TicketVerifyRequest,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_staff_or_admin),
     service: ReservationService = Depends(get_reservation_service),
 ):
     """Mark ticket as checked in / used for gate entry."""

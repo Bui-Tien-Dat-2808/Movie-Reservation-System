@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1 import analytics, auth, concessions, genres, loyalty, movies, payments, queue, refunds, reservations, rooms, showtimes, users, vouchers
+from app.api.v1 import analytics, auth, concessions, genres, loyalty, movies, payments, queue, refunds, reservations, reviews, rooms, showtimes, users, vouchers
 
 api_router = APIRouter()
 
@@ -17,4 +17,6 @@ api_router.include_router(concessions.router)
 api_router.include_router(loyalty.router)
 api_router.include_router(analytics.router)
 api_router.include_router(queue.router)
+api_router.include_router(reviews.router)
+
 

@@ -8,13 +8,13 @@ from app.db.session import engine, AsyncSessionLocal
 from app.models.user import User, UserRole
 
 # Import all models so Alembic and Base.metadata can find them
-from app.models import movie, genre, room, seat, showtime, showtime_seat, reservation, loyalty, concession  # noqa: F401
+import app.models  # noqa: F401
 
 logger = structlog.get_logger()
 
 
 async def init_db() -> None:
-    """Initialize the database: seed admin, rooms, and movies."""
+    """Initialize the database: create tables, run schema migrations, and seed data."""
     await _migrate_schema()
     await _seed_admin()
     await _seed_rooms()
@@ -25,14 +25,27 @@ async def init_db() -> None:
 
 
 async def _migrate_schema() -> None:
-    """Ensure missing columns like exchanged_from_reservation_id are added to DB tables."""
+    """Ensure all tables exist and missing columns are added to DB tables."""
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        logger.warning("create_all_tables_warning", error=str(e))
+
     async with AsyncSessionLocal() as db:
         try:
             await db.execute(
-                text("ALTER TABLE reservations ADD COLUMN exchanged_from_reservation_id INTEGER REFERENCES reservations(id) ON DELETE SET NULL;")
+                text("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS exchanged_from_reservation_id INTEGER REFERENCES reservations(id) ON DELETE SET NULL;")
             )
             await db.commit()
-            logger.info("Added exchanged_from_reservation_id column to reservations table")
+        except Exception:
+            await db.rollback()
+
+        try:
+            await db.execute(
+                text("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS min_loyalty_tier VARCHAR(20);")
+            )
+            await db.commit()
         except Exception:
             await db.rollback()
 

@@ -12,6 +12,7 @@ from app.models.refund import RefundTransaction
 from app.models.voucher import Voucher, VoucherDiscountType, VoucherRedemption
 from app.models.loyalty import PointTransaction
 from app.models.concession import Concession, ConcessionCategory, ReservationConcession
+from app.models.review import Review
 
 __all__ = [
     "User", "UserRole",
@@ -27,4 +28,5 @@ __all__ = [
     "Voucher", "VoucherDiscountType", "VoucherRedemption",
     "PointTransaction",
     "Concession", "ConcessionCategory", "ReservationConcession",
+    "Review",
 ]

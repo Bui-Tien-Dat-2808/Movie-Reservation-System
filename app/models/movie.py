@@ -60,6 +60,9 @@ class Movie(Base):
     showtimes: Mapped[List["Showtime"]] = relationship(  # noqa: F821
         "Showtime", back_populates="movie"
     )
+    reviews: Mapped[List["Review"]] = relationship(  # noqa: F821
+        "Review", back_populates="movie", cascade="all, delete-orphan"
+    )
 
     @property
     def cast(self) -> Optional[List[dict]]:
@@ -74,6 +77,21 @@ class Movie(Base):
     @property
     def genres(self) -> List["Genre"]:  # noqa: F821
         return [mg.genre for mg in self.movie_genres if mg.genre is not None]
+
+    @property
+    def avg_rating(self) -> Optional[float]:
+        """FEAT-07: Calculate average rating from loaded reviews or cached attribute."""
+        if "reviews" in self.__dict__ and self.reviews:
+            ratings = [r.rating for r in self.reviews if getattr(r, "rating", None) is not None]
+            return round(sum(ratings) / len(ratings), 1) if ratings else None
+        return getattr(self, "_avg_rating", None)
+
+    @property
+    def total_reviews(self) -> int:
+        """FEAT-07: Calculate total review count from loaded reviews or cached attribute."""
+        if "reviews" in self.__dict__ and self.reviews:
+            return len(self.reviews)
+        return getattr(self, "_total_reviews", 0)
 
     def __repr__(self) -> str:
         return f"<Movie id={self.id} title={self.title}>"

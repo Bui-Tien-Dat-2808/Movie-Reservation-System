@@ -31,12 +31,12 @@ class User(Base):
     loyalty_points: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     loyalty_tier: Mapped[str] = mapped_column(String(20), default="bronze", nullable=False)
 
-    # Relationships
+    # Relationships (PERF-03 & 04: use lazy="select" to prevent unnecessary eager loads on every auth check)
     reservations: Mapped[List["Reservation"]] = relationship(  # noqa: F821
-        "Reservation", back_populates="user", lazy="selectin"
+        "Reservation", back_populates="user", lazy="select"
     )
     point_transactions: Mapped[List["PointTransaction"]] = relationship(  # noqa: F821
-        "PointTransaction", back_populates="user", lazy="selectin"
+        "PointTransaction", back_populates="user", lazy="select"
     )
 
     def __repr__(self) -> str:

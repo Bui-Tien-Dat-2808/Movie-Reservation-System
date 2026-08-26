@@ -52,6 +52,8 @@ class MovieResponse(MovieBase):
     trailer_url: Optional[str] = None
     cast: Optional[List[CastMemberResponse]] = None
     genres: List[GenreResponse] = []
+    avg_rating: Optional[float] = None
+    total_reviews: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -72,6 +74,8 @@ class MovieListResponse(BaseModel):
     cast: Optional[List[CastMemberResponse]] = None
     status: MovieStatus
     genres: List[GenreResponse] = []
+    avg_rating: Optional[float] = None
+    total_reviews: int = 0
     created_at: datetime
 
     model_config = {"from_attributes": True}

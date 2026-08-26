@@ -185,6 +185,29 @@ class MovieService:
         result = await self.db.execute(query)
         movies = list(result.scalars().all())
 
+        # FEAT-07: Batch fetch review stats for movies
+        if movies:
+            from app.models.review import Review
+            movie_ids = [m.id for m in movies]
+            review_stats_stmt = (
+                select(
+                    Review.movie_id,
+                    func.avg(Review.rating).label("avg_rating"),
+                    func.count(Review.id).label("total_reviews"),
+                )
+                .where(Review.movie_id.in_(movie_ids))
+                .group_by(Review.movie_id)
+            )
+            stats_res = await self.db.execute(review_stats_stmt)
+            stats_map = {
+                r[0]: (round(float(r[1]), 1) if r[1] is not None else None, int(r[2]))
+                for r in stats_res.fetchall()
+            }
+            for m in movies:
+                avg_r, tot_r = stats_map.get(m.id, (None, 0))
+                m._avg_rating = avg_r
+                m._total_reviews = tot_r
+
         # 3. Store in Redis Cache (TTL = 300s)
         now_utc = datetime.now(timezone.utc)
         cache_data = {
@@ -204,6 +227,8 @@ class MovieService:
                     "director": m.director,
                     "trailer_url": getattr(m, "trailer_url", None),
                     "cast": json.loads(m.cast_json) if getattr(m, "cast_json", None) else None,
+                    "avg_rating": getattr(m, "avg_rating", None),
+                    "total_reviews": getattr(m, "total_reviews", 0),
                     "is_active": m.is_active,
                     "created_at": m.created_at.isoformat() if getattr(m, "created_at", None) else now_utc.isoformat(),
                     "updated_at": m.updated_at.isoformat() if getattr(m, "updated_at", None) else now_utc.isoformat(),
@@ -235,6 +260,15 @@ class MovieService:
         )
         movie = result.scalar_one_or_none()
         if movie:
+            from app.models.review import Review
+            stats_res = await self.db.execute(
+                select(func.avg(Review.rating), func.count(Review.id)).where(Review.movie_id == movie.id)
+            )
+            stats_row = stats_res.fetchone()
+            if stats_row:
+                movie._avg_rating = round(float(stats_row[0]), 1) if stats_row[0] is not None else None
+                movie._total_reviews = int(stats_row[1]) if stats_row[1] is not None else 0
+
             need_trailer = movie.trailer_url is None or not movie.trailer_url.startswith("https://www.youtube.com/embed/")
             need_director = not movie.director or movie.director in ["N/A", "Đang cập nhật", ""]
             need_cast = not movie.cast_json

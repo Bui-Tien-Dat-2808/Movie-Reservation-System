@@ -27,6 +27,7 @@ class Voucher(Base):
     is_first_booking_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     max_uses_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_uses_per_user: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    min_loyalty_tier: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # e.g. "bronze", "silver", "gold", "diamond"
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Relationships

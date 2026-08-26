@@ -7,9 +7,11 @@ from app.dependencies import bearer_scheme, get_current_user, get_db, get_redis
 from app.schemas.auth import (
     AccessTokenResponse,
     ChangePasswordRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     RefreshTokenRequest,
+    ResetPasswordRequest,
     TokenResponse,
 )
 from app.schemas.user import UserCreate, UserResponse
@@ -156,3 +158,49 @@ async def change_password(
     service = AuthService(db, CacheService(redis))
     await service.change_password(current_user.id, data.old_password, data.new_password)
     return {"message": "Mật khẩu đã được thay đổi thành công."}
+
+
+@router.post(
+    "/forgot-password",
+    status_code=status.HTTP_200_OK,
+    summary="Yêu cầu liên kết đặt lại mật khẩu qua email",
+)
+async def forgot_password(
+    data: ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """FEAT-06: Gửi email liên kết đặt lại mật khẩu."""
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    client_origin = None
+    if origin:
+        from urllib.parse import urlparse
+        parsed = urlparse(origin)
+        if parsed.scheme and parsed.netloc:
+            client_origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    service = AuthService(db, CacheService(redis))
+    await service.forgot_password(data.email, client_origin=client_origin)
+    return {"message": "Nếu email tồn tại trong hệ thống, liên kết đặt lại mật khẩu đã được gửi đến hộp thư của bạn."}
+
+
+@router.post(
+    "/reset-password",
+    status_code=status.HTTP_200_OK,
+    summary="Đặt lại mật khẩu mới bằng token",
+)
+async def reset_password(
+    data: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """FEAT-06: Xác thực token và cập nhật mật khẩu mới."""
+    if len(data.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu mới phải có tối thiểu 8 ký tự.",
+        )
+    service = AuthService(db, CacheService(redis))
+    await service.reset_password(data.token, data.new_password)
+    return {"message": "Mật khẩu của bạn đã được đặt lại thành công. Bạn có thể đăng nhập ngay bây giờ."}

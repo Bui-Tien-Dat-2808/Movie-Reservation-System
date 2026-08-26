@@ -55,22 +55,46 @@ class EmailService:
 
         # Showtimes and Movie Info
         showtime = getattr(reservation, "showtime", None)
-        movie_title = getattr(showtime.movie, "title", "Phim CineVerse") if showtime and getattr(showtime, "movie", None) else "Xem Phim Trực Tuyến"
-        movie_poster = getattr(showtime.movie, "poster_url", None) if showtime and getattr(showtime, "movie", None) else None
-        room_name = getattr(showtime.room, "name", "Phòng chiếu CineVerse") if showtime and getattr(showtime, "room", None) else "Phòng chiếu CineVerse"
-        room_type = getattr(showtime.room, "room_type", "2D") if showtime and getattr(showtime, "room", None) else "2D"
+        movie_title = (
+            getattr(showtime.movie, "title", "Phim CineVerse")
+            if showtime and getattr(showtime, "movie", None)
+            else "Xem Phim Trực Tuyến"
+        )
+        movie_poster = (
+            getattr(showtime.movie, "poster_url", None)
+            if showtime and getattr(showtime, "movie", None)
+            else None
+        )
+        room_name = (
+            getattr(showtime.room, "name", "Phòng chiếu CineVerse")
+            if showtime and getattr(showtime, "room", None)
+            else "Phòng chiếu CineVerse"
+        )
+        room_type = (
+            getattr(showtime.room, "room_type", "2D")
+            if showtime and getattr(showtime, "room", None)
+            else "2D"
+        )
 
         # Format start & end time in VN TZ
         start_str = "N/A"
         end_str = ""
         if showtime and getattr(showtime, "start_time", None):
-            start_dt = showtime.start_time.astimezone(VN_TZ) if hasattr(showtime.start_time, "astimezone") else showtime.start_time
+            start_dt = (
+                showtime.start_time.astimezone(VN_TZ)
+                if hasattr(showtime.start_time, "astimezone")
+                else showtime.start_time
+            )
             start_str = start_dt.strftime("%H:%M - %d/%m/%Y")
         if showtime and getattr(showtime, "end_time", None):
-            end_dt = showtime.end_time.astimezone(VN_TZ) if hasattr(showtime.end_time, "astimezone") else showtime.end_time
+            end_dt = (
+                showtime.end_time.astimezone(VN_TZ)
+                if hasattr(showtime.end_time, "astimezone")
+                else showtime.end_time
+            )
             end_str = end_dt.strftime("%H:%M")
 
-        time_display = f"{start_str}" + (f" (Kết thúc ~{end_str})" if end_str else "")
+        time_display = f"{start_str}"
 
         # Format Seats
         seats_list = []
@@ -91,17 +115,129 @@ class EmailService:
             pm_code = reservation.payment_transactions[0].payment_method
         pm_label = "Tiền mặt (Thanh toán tại rạp chiếu)" if pm_code == "cash" else "VNPay / ATM / Ví điện tử"
 
-        # Format Concessions / Food Combos if present
+        # -----------------------------------------------------------------
+        # Concessions / Food & Drink parsing
+        # -----------------------------------------------------------------
+        concessions_list = []
+        concessions_total = Decimal(0)
+
+        # 1. Check reservation_concessions relationship
+        if hasattr(reservation, "reservation_concessions") and reservation.reservation_concessions:
+            for rc in reservation.reservation_concessions:
+                qty = getattr(rc, "quantity", 1) or 1
+                unit_p = getattr(rc, "unit_price", None) or Decimal(0)
+                item_total = Decimal(qty) * Decimal(unit_p)
+                concessions_total += item_total
+
+                c_name = "Bắp nước"
+                c_obj = getattr(rc, "concession", None)
+                if c_obj:
+                    c_name = getattr(c_obj, "name", "Bắp nước")
+                    c_size = getattr(c_obj, "size", None)
+                    if c_size and f"size {c_size.lower()}" not in c_name.lower():
+                        c_name += f" (Size {c_size})"
+
+                c_opts = getattr(rc, "custom_options", "") or ""
+                concessions_list.append({
+                    "name": c_name,
+                    "quantity": qty,
+                    "unit_price": unit_p,
+                    "total_price": item_total,
+                    "custom_options": c_opts,
+                })
+
+        # 2. Fallback to notes if reservation_concessions is empty
+        if not concessions_list and hasattr(reservation, "notes") and reservation.notes:
+            notes = str(reservation.notes).strip()
+            if any(k in notes.lower() for k in ["combo:", "bắp", "bap", "nước", "nuoc", "snack", "popcorn", "coca", "pepsi"]):
+                clean_note = notes.replace("Combo:", "").replace("combo:", "").strip()
+                if clean_note:
+                    concessions_list.append({
+                        "name": clean_note,
+                        "quantity": 1,
+                        "unit_price": Decimal(0),
+                        "total_price": Decimal(0),
+                        "custom_options": "",
+                    })
+
+        # 3. Build Concessions HTML section (Only shown if user actually ordered concessions)
         concessions_html = ""
-        notes = getattr(reservation, "notes", "") or ""
-        if notes and "Combo:" in notes:
+        if concessions_list:
+            items_rows = []
+            for item in concessions_list:
+                # Deduplicate custom_options if it only repeats the size already present in name
+                opts = (item.get("custom_options") or "").strip()
+                if opts and opts.lower() in item["name"].lower():
+                    opts = ""
+
+                opts_html = (
+                    f'<div style="font-size: 11px; color: #a09e9a; margin-top: 3px; line-height: 1.4;">{opts}</div>'
+                    if opts
+                    else ""
+                )
+                price_html = (
+                    f'<span style="font-family: monospace; font-weight: 700; color: #e8b84b;">{cls.format_currency(item["total_price"])}</span>'
+                    if item.get("total_price") and item["total_price"] > 0
+                    else ""
+                )
+                items_rows.append(
+                    f"""
+                    <tr style="border-bottom: 1px dashed rgba(255,255,255,0.08);">
+                        <td style="padding: 8px 0; vertical-align: top;">
+                            <strong style="color: #ffffff; font-size: 13px;">{item['name']}: <span style="color: #e8b84b; font-weight: 700;">{item['quantity']}</span></strong>
+                            {opts_html}
+                        </td>
+                        <td align="right" style="padding: 8px 0; vertical-align: top; white-space: nowrap;">
+                            {price_html}
+                        </td>
+                    </tr>
+                    """
+                )
+
+            joined_items = "".join(items_rows)
             concessions_html = f"""
-            <div style="margin-top: 12px; padding: 10px; background: rgba(232, 184, 75, 0.1); border-left: 3px solid #e8b84b; border-radius: 6px; font-size: 13px; color: #f0ede8;">
-                🍿 <strong>Đồ ăn & Nước uống:</strong> {notes.replace('Combo:', '').strip()}
-            </div>
+            <!-- Concessions Section -->
+            <tr>
+                <td style="padding: 0 24px 12px 24px;">
+                    <div style="background: #181824; border-radius: 12px; padding: 16px; border: 1px solid rgba(232, 184, 75, 0.3);">
+                        <div style="font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #e8b84b; margin-bottom: 10px;">
+                            🍿 ĐỒ ĂN & NƯỚC UỐNG ĐI KÈM:
+                        </div>
+                        <table width="100%" cellspacing="0" cellpadding="0">
+                            {joined_items}
+                        </table>
+                    </div>
+                </td>
+            </tr>
             """
 
-        poster_html = f'<img src="{movie_poster}" alt="{movie_title}" style="width: 90px; height: 130px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); margin-right: 16px; float: left;">' if movie_poster else ''
+        # Payment Breakdown rows
+        discount_amount = getattr(reservation, "discount_amount", 0) or 0
+        discount_html = ""
+        if discount_amount and float(discount_amount) > 0:
+            voucher_code = getattr(reservation, "voucher_code", "") or ""
+            v_label = f"Giảm giá ({voucher_code}):" if voucher_code else "Giảm giá khuyến mãi:"
+            discount_html = f"""
+            <tr>
+                <td style="font-size: 13px; color: #a09e9a; padding-bottom: 6px;">{v_label}</td>
+                <td align="right" style="font-size: 13px; font-weight: 700; color: #ef4444; padding-bottom: 6px;">-{cls.format_currency(discount_amount)}</td>
+            </tr>
+            """
+
+        concessions_breakdown_html = ""
+        if concessions_total > 0:
+            concessions_breakdown_html = f"""
+            <tr>
+                <td style="font-size: 13px; color: #a09e9a; padding-bottom: 6px;">Bắp nước & đồ ăn:</td>
+                <td align="right" style="font-size: 13px; font-weight: 700; color: #e8b84b; padding-bottom: 6px;">{cls.format_currency(concessions_total)}</td>
+            </tr>
+            """
+
+        poster_html = (
+            f'<img src="{movie_poster}" alt="{movie_title}" style="width: 90px; height: 130px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); margin-right: 16px; float: left;">'
+            if movie_poster
+            else ''
+        )
 
         return f"""
         <!DOCTYPE html>
@@ -148,10 +284,11 @@ class EmailService:
                                             </p>
                                         </div>
                                         <div style="clear: both;"></div>
-                                        {concessions_html}
                                     </div>
                                 </td>
                             </tr>
+
+                            {concessions_html}
 
                             <!-- E-Ticket Barcode Container (Matches ETicketModal style) -->
                             <tr>
@@ -175,9 +312,11 @@ class EmailService:
                                             <td style="font-size: 13px; color: #a09e9a; padding-bottom: 6px;">Phương thức thanh toán:</td>
                                             <td align="right" style="font-size: 13px; font-weight: 700; color: #e8b84b; padding-bottom: 6px;">{pm_label}</td>
                                         </tr>
+                                        {concessions_breakdown_html}
+                                        {discount_html}
                                         <tr>
-                                            <td style="font-size: 14px; color: #a09e9a;">Tổng tiền đã thanh toán:</td>
-                                            <td align="right" style="font-size: 20px; font-weight: 900; color: #2ecc71; font-family: monospace;">{total_price_str}</td>
+                                            <td style="font-size: 14px; color: #a09e9a; padding-top: 4px;">Tổng tiền đã thanh toán:</td>
+                                            <td align="right" style="font-size: 20px; font-weight: 900; color: #2ecc71; font-family: monospace; padding-top: 4px;">{total_price_str}</td>
                                         </tr>
                                     </table>
                                 </td>
@@ -199,7 +338,6 @@ class EmailService:
         </body>
         </html>
         """
-
     @classmethod
     def send_ticket_email_raw(
         cls, user_email: str, ticket_code: str, html_content: str, barcode_bytes: bytes
@@ -622,4 +760,155 @@ class EmailService:
             return True
         except Exception as e:
             logger.exception("cash_cancel_email_send_failed", recipient=user_email, ticket_code=ticket_code, error=str(e))
+            return False
+
+    @classmethod
+    def build_password_changed_email_html(cls, full_name: str) -> str:
+        """Build HTML email alert for successful password change."""
+        now_str = datetime.now(VN_TZ).strftime("%H:%M:%S ngày %d/%m/%Y")
+        return f"""
+        <!DOCTYPE html>
+        <html lang="vi">
+        <head><meta charset="UTF-8"><title>Cảnh báo bảo mật mật khẩu</title></head>
+        <body style="margin: 0; padding: 0; background-color: #08080c; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f0ede8;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #08080c; padding: 40px 16px;">
+                <tr>
+                    <td align="center">
+                        <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 540px; background-color: #111118; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08);">
+                            <tr>
+                                <td style="padding: 32px 32px 24px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.08);">
+                                    <h1 style="margin: 0; font-size: 24px; font-weight: 900; color: #ff2a5f; letter-spacing: 1px;">CINEVERSE</h1>
+                                    <p style="margin: 6px 0 0; font-size: 13px; color: #a09d98;">CẢNH BÁO BẢO MẬT TÀI KHOẢN</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 32px;">
+                                    <div style="width: 56px; height: 56px; background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 50%; margin: 0 auto 20px; text-align: center; line-height: 56px; font-size: 24px;">🔐</div>
+                                    <h2 style="margin: 0 0 12px; font-size: 18px; font-weight: 700; text-align: center; color: #ffffff;">Mật khẩu tài khoản đã được thay đổi</h2>
+                                    <p style="margin: 0 0 20px; font-size: 14px; line-height: 1.6; color: #c4c1ba; text-align: center;">
+                                        Xin chào <strong>{full_name}</strong>,<br>
+                                        Mật khẩu tài khoản CineVerse của bạn đã được thay đổi thành công vào lúc <strong>{now_str}</strong>.
+                                    </p>
+                                    <div style="background-color: rgba(255, 42, 95, 0.08); border: 1px solid rgba(255, 42, 95, 0.25); border-radius: 12px; padding: 16px; margin-bottom: 24px;">
+                                        <p style="margin: 0; font-size: 13px; line-height: 1.5; color: #ff859d;">
+                                            ⚠️ <strong>Bạn không thực hiện thay đổi này?</strong><br>
+                                            Vui lòng liên hệ ngay với Hotline <strong>1900-CINEVERSE</strong> hoặc sử dụng chức năng Quên mật khẩu để bảo vệ tài khoản ngay lập tức.
+                                        </p>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="background-color: #0d0d14; padding: 16px 24px; text-align: center; border-top: 1px solid rgba(255,255,255,0.08);">
+                                    <p style="margin: 0; font-size: 11px; color: #6e6c68;">CineVerse Cinema · Hotline: 1900-CINEVERSE</p>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+    @classmethod
+    def send_password_changed_alert_email(cls, user_email: str, full_name: str) -> bool:
+        """FEAT-05: Dispatch security alert email when user password is changed."""
+        if not user_email:
+            return False
+        if not settings.EMAIL_ENABLED or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+            logger.info("pwd_changed_email_logged_dev_mode", recipient=user_email)
+            return True
+        try:
+            from_email = settings.SMTP_USER or settings.EMAILS_FROM_EMAIL
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "🔐 [CineVerse] Cảnh báo: Mật khẩu của bạn vừa được thay đổi"
+            msg["From"] = f"{settings.EMAILS_FROM_NAME} <{from_email}>"
+            msg["To"] = user_email
+            html_content = cls.build_password_changed_email_html(full_name)
+            msg.attach(MIMEText(html_content, "html", "utf-8"))
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10.0) as server:
+                server.starttls()
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.send_message(msg)
+            logger.info("pwd_changed_email_sent_successfully", recipient=user_email)
+            return True
+        except Exception as e:
+            logger.exception("pwd_changed_email_send_failed", recipient=user_email, error=str(e))
+            return False
+
+    @classmethod
+    def build_password_reset_email_html(cls, full_name: str, reset_url: str) -> str:
+        """Build HTML email template for password reset."""
+        return f"""
+        <!DOCTYPE html>
+        <html lang="vi">
+        <head><meta charset="UTF-8"><title>Đặt lại mật khẩu CineVerse</title></head>
+        <body style="margin: 0; padding: 0; background-color: #08080c; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f0ede8;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #08080c; padding: 40px 16px;">
+                <tr>
+                    <td align="center">
+                        <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 540px; background-color: #111118; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08);">
+                            <tr>
+                                <td style="padding: 32px 32px 24px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.08);">
+                                    <h1 style="margin: 0; font-size: 24px; font-weight: 900; color: #ff2a5f; letter-spacing: 1px;">CINEVERSE</h1>
+                                    <p style="margin: 6px 0 0; font-size: 13px; color: #a09d98;">YÊU CẦU ĐẶT LẠI MẬT KHẨU</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 32px; text-align: center;">
+                                    <div style="width: 56px; height: 56px; background-color: rgba(255, 42, 95, 0.15); border: 1px solid rgba(255, 42, 95, 0.3); border-radius: 50%; margin: 0 auto 20px; text-align: center; line-height: 56px; font-size: 24px;">🔑</div>
+                                    <h2 style="margin: 0 0 12px; font-size: 18px; font-weight: 700; color: #ffffff;">Khôi phục mật khẩu tài khoản</h2>
+                                    <p style="margin: 0 0 24px; font-size: 14px; line-height: 1.6; color: #c4c1ba;">
+                                        Xin chào <strong>{full_name}</strong>,<br>
+                                        Chúng tôi nhận được yêu cầu đặt lại mật khẩu cho tài khoản CineVerse của bạn. Nhấn vào nút bên dưới để tạo mật khẩu mới (liên kết có hiệu lực trong <strong>15 phút</strong>):
+                                    </p>
+                                    <div style="margin: 28px 0;">
+                                        <a href="{reset_url}" target="_blank" style="display: inline-block; background-color: #ff2a5f; color: #ffffff; text-decoration: none; padding: 14px 32px; font-size: 14px; font-weight: 700; border-radius: 12px; box-shadow: 0 4px 14px rgba(255, 42, 95, 0.4);">
+                                            👉 Đặt lại mật khẩu ngay
+                                        </a>
+                                    </div>
+                                    <p style="margin: 24px 0 0; font-size: 12px; line-height: 1.5; color: #8e8b84;">
+                                        Nếu bạn không yêu cầu đặt lại mật khẩu, bạn có thể yên tâm bỏ qua email này. Mật khẩu hiện tại của bạn vẫn được giữ an toàn.
+                                    </p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="background-color: #0d0d14; padding: 16px 24px; text-align: center; border-top: 1px solid rgba(255,255,255,0.08);">
+                                    <p style="margin: 0; font-size: 11px; color: #6e6c68;">CineVerse Cinema · Hotline: 1900-CINEVERSE</p>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+    @classmethod
+    def send_password_reset_email(cls, user_email: str, full_name: str, reset_token: str, frontend_base_url: Optional[str] = None) -> bool:
+        """FEAT-06: Dispatch password reset email with secure token link."""
+        if not user_email:
+            return False
+        base_url = (frontend_base_url or settings.FRONTEND_BASE_URL).rstrip("/")
+        reset_url = f"{base_url}?reset_token={reset_token}"
+        if not settings.EMAIL_ENABLED or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+            logger.info("pwd_reset_email_logged_dev_mode", recipient=user_email, reset_url=reset_url)
+            return True
+        try:
+            from_email = settings.SMTP_USER or settings.EMAILS_FROM_EMAIL
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "🔑 [CineVerse] Yêu cầu đặt lại mật khẩu tài khoản"
+            msg["From"] = f"{settings.EMAILS_FROM_NAME} <{from_email}>"
+            msg["To"] = user_email
+            html_content = cls.build_password_reset_email_html(full_name, reset_url)
+            msg.attach(MIMEText(html_content, "html", "utf-8"))
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10.0) as server:
+                server.starttls()
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.send_message(msg)
+            logger.info("pwd_reset_email_sent_successfully", recipient=user_email, reset_url=reset_url)
+            return True
+        except Exception as e:
+            logger.exception("pwd_reset_email_send_failed", recipient=user_email, error=str(e))
             return False

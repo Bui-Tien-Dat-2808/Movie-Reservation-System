@@ -16,6 +16,7 @@ class VoucherBase(BaseModel):
     is_first_booking_only: bool = False
     max_uses_total: Optional[int] = Field(None, ge=1)
     max_uses_per_user: Optional[int] = Field(None, ge=1)
+    min_loyalty_tier: Optional[str] = None
     is_active: bool = True
 
 
@@ -34,11 +35,13 @@ class VoucherUpdate(BaseModel):
     is_first_booking_only: Optional[bool] = None
     max_uses_total: Optional[int] = Field(None, ge=1)
     max_uses_per_user: Optional[int] = Field(None, ge=1)
+    min_loyalty_tier: Optional[str] = None
     is_active: Optional[bool] = None
 
 
 class VoucherResponse(VoucherBase):
     id: int
+    min_loyalty_tier: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

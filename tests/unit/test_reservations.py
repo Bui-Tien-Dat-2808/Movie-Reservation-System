@@ -153,23 +153,43 @@ class TestReservationQueueAndLoyaltyLifecycle:
         # 1. get showtime
         # 2. get showtime_seats
         # 3. get full_reservation with relationships
-        mock_res_showtime = MagicMock(scalar_one_or_none=lambda: showtime)
-        mock_res_none = MagicMock(scalar_one_or_none=lambda: None)
-        mock_res_seats = MagicMock(scalars=lambda: MagicMock(all=lambda: [ss1]))
+        from app.models.seat import Seat, SeatType
+        mock_seat = Seat(id=100, room_id=1, row_label="A", col_number=1, seat_type=SeatType.STANDARD)
+
+        mock_res_showtime = MagicMock()
+        mock_res_showtime.scalar_one_or_none.return_value = showtime
+
+        mock_res_none = MagicMock()
+        mock_res_none.scalar_one_or_none.return_value = None
+
+        mock_res_showtime_seats = MagicMock()
+        mock_res_showtime_seats.scalars.return_value.all.return_value = [ss1]
+
+        mock_res_actual_seats = MagicMock()
+        mock_res_actual_seats.scalars.return_value.all.return_value = [mock_seat]
 
         created_res = MagicMock(id=123, showtime_id=1, user_id=50, total_price=Decimal("100000"), status="pending")
-        mock_res_full = MagicMock(scalar_one=lambda: created_res)
+        mock_res_full = MagicMock()
+        mock_res_full.scalar_one.return_value = created_res
 
         mock_db.flush = AsyncMock()
         mock_db.refresh = AsyncMock()
 
-        mock_db.execute.side_effect = [
-            mock_res_showtime,
-            mock_res_seats,
-            mock_res_none,
-            mock_res_full,
-            mock_res_full,
-        ]
+        async def mock_execute(stmt, *args, **kwargs):
+            stmt_str = str(stmt).lower()
+            if "ticket_code =" in stmt_str or "ticket_code = :" in stmt_str:
+                return mock_res_none
+            elif "from reservations" in stmt_str:
+                return mock_res_full
+            elif "from showtime_seats" in stmt_str:
+                return mock_res_showtime_seats
+            elif "from showtimes" in stmt_str:
+                return mock_res_showtime
+            elif "from seats" in stmt_str:
+                return mock_res_actual_seats
+            return mock_res_none
+
+        mock_db.execute = AsyncMock(side_effect=mock_execute)
 
         service = ReservationService(mock_db, mock_cache)
         data = ReservationCreate(showtime_id=1, seat_ids=[100])

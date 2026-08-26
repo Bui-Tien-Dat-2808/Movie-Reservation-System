@@ -90,6 +90,27 @@ class VoucherService:
                     detail=f"Mã giảm giá '{voucher.code}' chỉ áp dụng cho đơn đặt vé đầu tiên.",
                 )
 
+        # 4b. Minimum Loyalty Tier check (FEAT-03)
+        if voucher.min_loyalty_tier and user_id:
+            from app.models.user import User
+            user_res = await self.db.execute(select(User).where(User.id == user_id))
+            user_obj = user_res.scalar_one_or_none()
+
+            TIER_RANKS = {"bronze": 1, "silver": 2, "gold": 3, "diamond": 4}
+            user_tier = (getattr(user_obj, "loyalty_tier", None) or "bronze").lower()
+            required_tier = voucher.min_loyalty_tier.lower()
+
+            user_rank = TIER_RANKS.get(user_tier, 1)
+            required_rank = TIER_RANKS.get(required_tier, 1)
+
+            TIER_NAMES = {"bronze": "Đồng (Bronze)", "silver": "Bạc (Silver)", "gold": "Vàng (Gold)", "diamond": "Kim Cương (Diamond)"}
+            if user_rank < required_rank:
+                req_name = TIER_NAMES.get(required_tier, required_tier.capitalize())
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Mã giảm giá '{voucher.code}' chỉ dành riêng cho thành viên hạng {req_name} trở lên.",
+                )
+
         # 5. Max uses per user check
         if voucher.max_uses_per_user and user_id:
             user_redemptions_stmt = select(func.count(VoucherRedemption.id)).where(

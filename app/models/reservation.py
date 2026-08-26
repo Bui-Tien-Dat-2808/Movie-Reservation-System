@@ -72,8 +72,14 @@ class Reservation(Base):
 
     @property
     def payment_method(self) -> str:
-        if self.payment_transactions and len(self.payment_transactions) > 0:
-            return self.payment_transactions[0].payment_method
+        if self.payment_transactions:
+            # BUG-11: Ưu tiên transaction thành công
+            for tx in self.payment_transactions:
+                if getattr(tx, "status", None) == "success":
+                    return tx.payment_method
+            # Fallback transaction gần nhất
+            if len(self.payment_transactions) > 0:
+                return self.payment_transactions[-1].payment_method
         return "vnpay"
 
     def __repr__(self) -> str:

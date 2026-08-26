@@ -5,6 +5,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.models.reservation import ReservationStatus
+from app.schemas.concession import ConcessionOrderItem, ReservationConcessionResponse
 
 
 class ShowtimeSummary(BaseModel):
@@ -35,6 +36,8 @@ class ReservationCreate(BaseModel):
     showtime_id: int
     seat_ids: List[int] = Field(..., min_length=1, max_length=10)
     voucher_code: Optional[str] = None
+    concessions: Optional[List[ConcessionOrderItem]] = None
+    concession_orders: Optional[List[ConcessionOrderItem]] = None
 
 
 class ReservationExchangeRequest(BaseModel):
@@ -61,6 +64,7 @@ class ReservationResponse(BaseModel):
     notes: Optional[str] = None
     exchanged_from_reservation_id: Optional[int] = None
     reservation_seats: List[ReservationSeatResponse] = []
+    reservation_concessions: List[ReservationConcessionResponse] = []
     showtime: Optional[ShowtimeSummary] = None
     created_at: datetime
 

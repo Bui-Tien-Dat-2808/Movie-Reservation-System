@@ -1,7 +1,7 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import structlog
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends
+from datetime import date, datetime, timezone
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, text
 from sqlalchemy.orm import selectinload
@@ -20,25 +20,32 @@ logger = structlog.get_logger()
 
 @router.get("/dashboard", summary="Get real live database analytics (Admin)")
 async def get_dashboard_analytics(
+    start_date: Optional[date] = Query(None, description="Ngày bắt đầu (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Ngày kết thúc (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
     _=Depends(require_admin),
 ):
     """
-    Admin: Calculate real live analytics aggregated directly from PostgreSQL database.
+    Admin: Calculate real live analytics aggregated directly from PostgreSQL database with optional date range filter.
     """
-    # 1. Total Revenue from Confirmed Reservations
+    # FEAT-04: Build date range filter conditions
+    conditions = [Reservation.status == ReservationStatus.CONFIRMED]
+    if start_date:
+        start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+        conditions.append(Reservation.created_at >= start_dt)
+    if end_date:
+        end_dt = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
+        conditions.append(Reservation.created_at <= end_dt)
+
+    # 1. Total Revenue from Confirmed Reservations in range
     rev_res = await db.execute(
-        select(func.coalesce(func.sum(Reservation.total_price), 0)).where(
-            Reservation.status == ReservationStatus.CONFIRMED
-        )
+        select(func.coalesce(func.sum(Reservation.total_price), 0)).where(*conditions)
     )
     total_revenue = float(rev_res.scalar() or 0)
 
-    # 2. Total Confirmed Ticket/Reservation Count
+    # 2. Total Confirmed Ticket/Reservation Count in range
     res_count_res = await db.execute(
-        select(func.count(Reservation.id)).where(
-            Reservation.status == ReservationStatus.CONFIRMED
-        )
+        select(func.count(Reservation.id)).where(*conditions)
     )
     total_reservations = int(res_count_res.scalar() or 0)
 
@@ -60,7 +67,7 @@ async def get_dashboard_analytics(
     showtimes_count_res = await db.execute(select(func.count(Showtime.id)))
     total_showtimes_count = int(showtimes_count_res.scalar() or 0)
 
-    # 7. Real Monthly Revenue Aggregation (Grouped by YYYY-MM)
+    # 7. Real Monthly/Daily Revenue Aggregation (Grouped by YYYY-MM or YYYY-MM-DD)
     month_select = text("to_char(created_at, 'YYYY-MM') AS month_key")
     month_group = text("to_char(created_at, 'YYYY-MM')")
     monthly_stmt = (
@@ -69,7 +76,7 @@ async def get_dashboard_analytics(
             func.coalesce(func.sum(Reservation.total_price), 0).label("revenue"),
             func.count(Reservation.id).label("tickets")
         )
-        .where(Reservation.status == ReservationStatus.CONFIRMED)
+        .where(*conditions)
         .group_by(month_group)
         .order_by(month_group)
     )
@@ -95,7 +102,7 @@ async def get_dashboard_analytics(
         )
         .join(Showtime, Reservation.showtime_id == Showtime.id)
         .join(Movie, Showtime.movie_id == Movie.id)
-        .where(Reservation.status == ReservationStatus.CONFIRMED)
+        .where(*conditions)
         .group_by(Movie.id, Movie.title)
         .order_by(desc("revenue"))
         .limit(6)
@@ -115,23 +122,25 @@ async def get_dashboard_analytics(
             "percentage": pct,
         })
 
-    # 9. Real Room Occupancy Rates
-    rooms_stmt = select(Room).options(selectinload(Room.seats))
+    # 9. Real Room Occupancy Rates (PERF-01: Single aggregated query to prevent N+1 queries)
+    rooms_stmt = select(Room)
     rooms = (await db.execute(rooms_stmt)).scalars().all()
+
+    occ_stmt = (
+        select(
+            Showtime.room_id,
+            func.count(ShowtimeSeat.id).label("total_cnt"),
+            func.count(ShowtimeSeat.id).filter(ShowtimeSeat.status == SeatStatus.BOOKED).label("booked_cnt"),
+        )
+        .join(ShowtimeSeat, ShowtimeSeat.showtime_id == Showtime.id)
+        .group_by(Showtime.room_id)
+    )
+    occ_res = (await db.execute(occ_stmt)).all()
+    occ_map = {row[0]: (row[1] or 0, row[2] or 0) for row in occ_res}
 
     room_occupancy = []
     for room in rooms:
-        booked_st = select(func.count(ShowtimeSeat.id)).join(Showtime).where(
-            Showtime.room_id == room.id,
-            ShowtimeSeat.status == SeatStatus.BOOKED
-        )
-        booked_cnt = (await db.execute(booked_st)).scalar() or 0
-
-        total_st = select(func.count(ShowtimeSeat.id)).join(Showtime).where(
-            Showtime.room_id == room.id
-        )
-        total_cnt = (await db.execute(total_st)).scalar() or 0
-
+        total_cnt, booked_cnt = occ_map.get(room.id, (0, 0))
         occ_rate = round((booked_cnt / total_cnt * 100), 1) if total_cnt > 0 else 0.0
         room_occupancy.append({
             "room_id": room.id,
@@ -144,9 +153,9 @@ async def get_dashboard_analytics(
     # 10. Recent Transactions List
     recent_stmt = (
         select(Reservation)
-        .where(Reservation.status == ReservationStatus.CONFIRMED)
+        .where(*conditions)
         .order_by(Reservation.created_at.desc())
-        .limit(5)
+        .limit(10)
         .options(
             selectinload(Reservation.user),
             selectinload(Reservation.showtime).selectinload(Showtime.movie),
@@ -169,6 +178,8 @@ async def get_dashboard_analytics(
 
     return {
         "is_live_db": True,
+        "start_date": start_date.isoformat() if start_date else None,
+        "end_date": end_date.isoformat() if end_date else None,
         "total_revenue": total_revenue,
         "total_reservations": total_reservations,
         "active_movies_count": active_movies_count,

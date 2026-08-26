@@ -136,3 +136,14 @@ async def get_current_user_optional(
         return await get_current_user(credentials, db, redis)
     except HTTPException:
         return None
+
+
+async def get_review_service(
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    from app.services.cache_service import CacheService
+    from app.services.review_service import ReviewService
+    cache = CacheService(redis)
+    return ReviewService(db, cache)
+

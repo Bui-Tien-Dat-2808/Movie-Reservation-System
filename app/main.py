@@ -53,7 +53,7 @@ async def periodic_movie_sync():
 
             async with AsyncSessionLocal() as db:
                 service = MovieService(db, CacheService(None))
-                result = await service.update_movie_statuses()
+                result = await service.auto_update_movie_statuses()
                 logger.info("Periodic movie status update completed", changes=result)
 
             # Repeat every 12 hours (43200 seconds)
@@ -126,11 +126,11 @@ Authorization: Bearer <access_token>
     # GZip compression middleware (compresses responses > 1KB)
     app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-    # CORS
+    # CORS — cho phép các origin được khai báo và các domain/IP nội bộ (localhost, LAN IPs, dev ports)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins_list,
-        allow_origin_regex=r"https?://.*",
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|.*)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -177,7 +177,8 @@ Authorization: Bearer <access_token>
             async with AsyncSessionLocal() as db:
                 await db.execute(text("SELECT 1"))
         except Exception as e:
-            db_status = f"unhealthy: {str(e)}"
+            logger.error("health_check_db_error", error=str(e))
+            db_status = "unhealthy"
 
         return {
             "status": "healthy" if db_status == "healthy" else "degraded",

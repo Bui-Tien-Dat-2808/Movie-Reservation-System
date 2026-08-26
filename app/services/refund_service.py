@@ -29,12 +29,15 @@ VNPAY_REFUND_URL = "https://sandbox.vnpayment.vn/merchant_webapi/api/transaction
 class RefundService:
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.vnp_tmn_code = getattr(settings, "VNPAY_TMN_CODE", "S6967RVA")
-        self.vnp_hash_secret = getattr(settings, "VNPAY_HASH_SECRET", "NTDXCYCSAOPNANKALKQZICSVHTRLIKUX")
+        # SEC-03: Không dùng fallback hardcoded credentials — phải set qua biến môi trường
+        self.vnp_tmn_code = settings.VNPAY_TMN_CODE
+        self.vnp_hash_secret = settings.VNPAY_HASH_SECRET
+        if not self.vnp_tmn_code or not self.vnp_hash_secret:
+            logger.warning("vnpay_credentials_not_configured", detail="VNPAY_TMN_CODE or VNPAY_HASH_SECRET is empty — refund will fail")
 
     async def initiate_refund(
         self, payment: PaymentTransaction, reason: str, amount: Optional[Decimal] = None
-    ) -> RefundTransaction:
+    ) -> Optional[RefundTransaction]:
         """Initiate refund for a paid reservation."""
         if payment and payment.payment_method == "cash":
             logger.info("skip_vnpay_refund_for_cash", payment_id=payment.id)

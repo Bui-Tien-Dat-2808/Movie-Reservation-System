@@ -195,3 +195,48 @@ def test_send_cash_cancellation_email_smtp():
             reason="Khách hàng huỷ vé",
         )
         assert res_ok is True
+
+
+def test_ticket_email_concessions_present_vs_absent():
+    # 1. Test when user HAS ordered concessions
+    res_with_food = MagicMock()
+    res_with_food.id = 101
+    res_with_food.ticket_code = "CVN-FOOD01"
+    res_with_food.total_price = 285000
+    res_with_food.showtime = None
+    res_with_food.reservation_seats = []
+    res_with_food.notes = None
+
+    c_mock = MagicMock()
+    c_mock.name = "Combo 1 Bắp + 2 Nước"
+    c_mock.size = None
+
+    rc = MagicMock()
+    rc.concession = c_mock
+    rc.quantity = 1
+    rc.unit_price = 95000
+    rc.custom_options = "Bắp: Bắp Rang Ngọt (Size M) • Nước 1: CocaCola • Nước 2: 7Up"
+
+    res_with_food.reservation_concessions = [rc]
+
+    html_with_food = EmailService.build_ticket_email_html(res_with_food)
+    assert "ĐỒ ĂN & NƯỚC UỐNG ĐI KÈM" in html_with_food
+    assert "Combo 1 Bắp + 2 Nước" in html_with_food
+    assert "Bắp: Bắp Rang Ngọt (Size M)" in html_with_food
+    assert "95.000₫" in html_with_food
+    assert "Bắp nước & đồ ăn:" in html_with_food
+
+    # 2. Test when user DID NOT order concessions
+    res_no_food = MagicMock()
+    res_no_food.id = 102
+    res_no_food.ticket_code = "CVN-NOFOOD02"
+    res_no_food.total_price = 190000
+    res_no_food.showtime = None
+    res_no_food.reservation_seats = []
+    res_no_food.reservation_concessions = []
+    res_no_food.notes = ""
+
+    html_no_food = EmailService.build_ticket_email_html(res_no_food)
+    assert "ĐỒ ĂN & NƯỚC UỐNG ĐI KÈM" not in html_no_food
+    assert "Bắp nước & đồ ăn:" not in html_no_food
+

@@ -40,6 +40,8 @@ class ConcessionResponse(ConcessionBase):
 class ConcessionOrderItem(BaseModel):
     concession_id: int
     quantity: int = Field(..., gt=0)
+    custom_options: Optional[str] = None
+    unit_price: Optional[Decimal] = None
 
 
 class ReservationConcessionResponse(BaseModel):
@@ -47,5 +49,6 @@ class ReservationConcessionResponse(BaseModel):
     quantity: int
     unit_price: Decimal
     concession_name: Optional[str] = None
+    custom_options: Optional[str] = None
 
     model_config = {"from_attributes": True}

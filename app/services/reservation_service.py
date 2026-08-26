@@ -87,21 +87,55 @@ class ReservationService:
         subtotal = Decimal("0")
         seat_prices = {}
 
-        # Load seats to get types
+        # BUG-01: Load seats in a single query to eliminate N+1 queries
         from app.models.seat import Seat, SeatType
+        seat_ids_to_fetch = [ss.seat_id for ss in locked_seats]
+        if seat_ids_to_fetch:
+            seat_result = await self.db.execute(select(Seat).where(Seat.id.in_(seat_ids_to_fetch)))
+            seats_map = {s.id: s for s in seat_result.scalars().all()}
+        else:
+            seats_map = {}
+
         for ss in locked_seats:
-            seat_result = await self.db.execute(select(Seat).where(Seat.id == ss.seat_id))
-            seat = seat_result.scalar_one()
-            if seat.seat_type == SeatType.COUPLE:
+            seat = seats_map.get(ss.seat_id)
+            if seat and seat.seat_type == SeatType.COUPLE:
                 price = showtime.couple_price or (showtime.vip_price * Decimal("1.25") if showtime.vip_price else showtime.base_price * Decimal("1.8"))
-            elif seat.seat_type == SeatType.VIP and showtime.vip_price:
+            elif seat and seat.seat_type == SeatType.VIP and showtime.vip_price:
                 price = showtime.vip_price
-            elif seat.seat_type == SeatType.KIDS:
+            elif seat and seat.seat_type == SeatType.KIDS:
                 price = showtime.base_price * Decimal("0.85")
             else:
                 price = showtime.base_price
             seat_prices[ss.id] = price
             subtotal += price
+
+        # Process concessions if provided (batch fetch concessions)
+        concessions_to_create = []
+        concession_list = data.concessions or data.concession_orders
+        if concession_list:
+            from app.models.concession import Concession, ReservationConcession
+            c_ids = [c.concession_id for c in concession_list if c.quantity > 0]
+            if c_ids:
+                c_res = await self.db.execute(select(Concession).where(Concession.id.in_(c_ids)))
+                concessions_map = {c.id: c for c in c_res.scalars().all()}
+            else:
+                concessions_map = {}
+
+            for c_item in concession_list:
+                if c_item.quantity <= 0:
+                    continue
+                concession = concessions_map.get(c_item.concession_id)
+                if concession and concession.is_active:
+                    unit_price = Decimal(str(c_item.unit_price)) if (c_item.unit_price is not None and c_item.unit_price > 0) else concession.price
+                    subtotal += unit_price * c_item.quantity
+                    concessions_to_create.append(
+                        ReservationConcession(
+                            concession_id=concession.id,
+                            quantity=c_item.quantity,
+                            unit_price=unit_price,
+                            custom_options=c_item.custom_options,
+                        )
+                    )
 
         # Process voucher discount if provided
         voucher_code = None
@@ -144,6 +178,11 @@ class ReservationService:
         self.db.add(reservation)
         await self.db.flush()
 
+        # Save reservation concessions
+        for rc in concessions_to_create:
+            rc.reservation_id = reservation.id
+            self.db.add(rc)
+
         # Record voucher redemption if applicable
         if matched_voucher:
             await voucher_service.record_redemption(
@@ -161,18 +200,28 @@ class ReservationService:
             rs = ReservationSeat(
                 reservation_id=reservation.id,
                 showtime_seat_id=ss.id,
-                price=seat_prices[ss.id],
+                price=seat_prices.get(ss.id, showtime.base_price),
             )
             self.db.add(rs)
 
-        # Generate unique 6-character random alphanumeric ticket code (e.g. CVN-W1E8KG)
+        # CQ-10: Generate unique 6-character alphanumeric ticket code with collision detection
         import secrets, string
         chars = string.ascii_uppercase + string.digits
-        rand_code = ''.join(secrets.choice(chars) for _ in range(6))
-        reservation.ticket_code = f"CVN-{rand_code}"
+        for _ in range(5):
+            rand_code = ''.join(secrets.choice(chars) for _ in range(6))
+            candidate_code = f"CVN-{rand_code}"
+            existing = await self.db.execute(
+                select(Reservation.id).where(Reservation.ticket_code == candidate_code)
+            )
+            if not existing.scalar_one_or_none():
+                reservation.ticket_code = candidate_code
+                break
+        else:
+            reservation.ticket_code = f"CVN-{secrets.token_hex(4).upper()}"
         await self.db.flush()
 
         # Load full reservation with relationships
+        from app.models.concession import ReservationConcession
         result = await self.db.execute(
             select(Reservation)
             .where(Reservation.id == reservation.id)
@@ -180,6 +229,8 @@ class ReservationService:
                 selectinload(Reservation.reservation_seats)
                 .selectinload(ReservationSeat.showtime_seat)
                 .selectinload(ShowtimeSeat.seat),
+                selectinload(Reservation.reservation_concessions)
+                .selectinload(ReservationConcession.concession),
                 selectinload(Reservation.showtime)
                 .selectinload(Showtime.movie),
                 selectinload(Reservation.showtime)
@@ -203,18 +254,23 @@ class ReservationService:
         self, user_id: int, pagination: PaginationParams
     ) -> tuple[List[Reservation], int]:
         """Get reservations for a user."""
-        query = select(Reservation).where(Reservation.user_id == user_id)
-        count_q = select(func.count()).select_from(query.subquery())
+        from app.models.concession import ReservationConcession
+        # PERF-06: Direct count query
+        count_q = select(func.count(Reservation.id)).where(Reservation.user_id == user_id)
         total = (await self.db.execute(count_q)).scalar_one()
 
         query = (
-            query.offset(pagination.offset)
+            select(Reservation)
+            .where(Reservation.user_id == user_id)
+            .offset(pagination.offset)
             .limit(pagination.limit)
             .order_by(Reservation.created_at.desc())
             .options(
                 selectinload(Reservation.reservation_seats)
                 .selectinload(ReservationSeat.showtime_seat)
                 .selectinload(ShowtimeSeat.seat),
+                selectinload(Reservation.reservation_concessions)
+                .selectinload(ReservationConcession.concession),
                 selectinload(Reservation.showtime).selectinload(Showtime.movie),
                 selectinload(Reservation.showtime).selectinload(Showtime.room),
             )
@@ -224,6 +280,7 @@ class ReservationService:
 
     async def get_reservation(self, reservation_id: int, user_id: Optional[int] = None) -> Reservation:
         """Get a reservation by ID. If user_id given, enforce ownership."""
+        from app.models.concession import ReservationConcession
         query = (
             select(Reservation)
             .where(Reservation.id == reservation_id)
@@ -231,6 +288,8 @@ class ReservationService:
                 selectinload(Reservation.reservation_seats)
                 .selectinload(ReservationSeat.showtime_seat)
                 .selectinload(ShowtimeSeat.seat),
+                selectinload(Reservation.reservation_concessions)
+                .selectinload(ReservationConcession.concession),
                 selectinload(Reservation.showtime).selectinload(Showtime.movie),
                 selectinload(Reservation.showtime).selectinload(Showtime.room),
             )
@@ -255,6 +314,10 @@ class ReservationService:
 
         cancel_reason = reason.strip() if (reason and reason.strip()) else "Khách hàng huỷ vé"
 
+        # BUG-09: Nếu đơn còn ở trạng thái PENDING (chưa thanh toán), hủy trực tiếp không cần tính hoàn tiền
+        if reservation.status == ReservationStatus.PENDING:
+            return await self.cancel_pending_reservation(reservation_id, reason=cancel_reason)
+
         # Check showtime is at least 30 minutes in the future
         showtime = await self.db.get(Showtime, reservation.showtime_id)
         from datetime import datetime, timezone, timedelta
@@ -271,14 +334,14 @@ class ReservationService:
                 f"Vé chỉ có thể hủy trước giờ chiếu tối thiểu {min_mins} phút."
             )
 
-        # Free up the seats and add back to DB session
+        # BUG-02: Free up the seats in a single query to eliminate N+1 queries
         freed_seat_ids = []
-        for rs in reservation.reservation_seats:
+        ss_ids = [rs.showtime_seat_id for rs in (reservation.reservation_seats or []) if rs.showtime_seat_id]
+        if ss_ids:
             ss_result = await self.db.execute(
-                select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id)
+                select(ShowtimeSeat).where(ShowtimeSeat.id.in_(ss_ids))
             )
-            ss = ss_result.scalar_one_or_none()
-            if ss:
+            for ss in ss_result.scalars().all():
                 ss.status = SeatStatus.AVAILABLE
                 ss.held_by = None
                 ss.held_until = None
@@ -286,10 +349,20 @@ class ReservationService:
                 freed_seat_ids.append(ss.seat_id)
 
         reservation.status = ReservationStatus.CANCELLED
-        # Save cancellation reason into reservation notes
-        existing_notes = reservation.notes or ""
+        # CQ-04: Format cancellation reason cleanly
+        existing_notes = (reservation.notes or "").strip()
         reason_note = f"Lý do hủy: {cancel_reason}"
-        reservation.notes = f"{existing_notes} | {reason_note}" if (existing_notes and "Lý do hủy:" not in existing_notes) else (reason_note if not existing_notes else existing_notes)
+        if not existing_notes:
+            reservation.notes = reason_note
+        elif "Lý do hủy:" not in existing_notes:
+            reservation.notes = f"{existing_notes} | {reason_note}"
+
+        # BUG-08: Release voucher redemption on cancellation
+        from sqlalchemy import delete
+        from app.models.voucher import VoucherRedemption
+        await self.db.execute(
+            delete(VoucherRedemption).where(VoucherRedemption.reservation_id == reservation.id)
+        )
         await self.db.flush()
 
         # Invalidate cached seat map for this showtime
@@ -410,9 +483,9 @@ class ReservationService:
         from app.config import settings
         now = datetime.now(timezone.utc)
         min_mins = getattr(settings, "MIN_MINUTES_BEFORE_CANCEL_OR_EXCHANGE", 30)
-        cutoff = old_reservation.showtime.start_time - timedelta(minutes=min_mins)
+        cutoff = ensure_utc(old_reservation.showtime.start_time) - timedelta(minutes=min_mins)
 
-        if ensure_utc(now) >= ensure_utc(cutoff):
+        if now >= cutoff:
             from app.core.exceptions import ValidationException
             raise ValidationException(
                 f"Vé chỉ có thể đổi sang suất khác trước giờ chiếu tối thiểu {min_mins} phút."
@@ -558,6 +631,7 @@ class ReservationService:
             selectinload(Reservation.showtime).selectinload(Showtime.movie),
             selectinload(Reservation.showtime).selectinload(Showtime.room),
             selectinload(Reservation.reservation_seats).selectinload(ReservationSeat.showtime_seat).selectinload(ShowtimeSeat.seat),
+            selectinload(Reservation.reservation_concessions).selectinload(ReservationConcession.concession),
         ]
 
         # Generate 0 / O variants to prevent O vs 0 typos
@@ -577,11 +651,20 @@ class ReservationService:
         if reservation:
             return reservation
 
-        # 2. Match ID if user/staff typed #67 or 67
-        id_match = re.search(r"\d+", clean_code)
-        if id_match:
+        # 2. Match ID if user/staff typed #67 or exact numeric string "67"
+        if clean_code.startswith("#") and clean_code[1:].isdigit():
             try:
-                res_id = int(id_match.group())
+                res_id = int(clean_code[1:])
+                stmt_id = select(Reservation).where(Reservation.id == res_id).options(*options)
+                res_by_id = await self.db.execute(stmt_id)
+                r_by_id = res_by_id.scalar_one_or_none()
+                if r_by_id:
+                    return r_by_id
+            except ValueError:
+                pass
+        elif clean_code.isdigit() and len(clean_code) <= 8:
+            try:
+                res_id = int(clean_code)
                 stmt_id = select(Reservation).where(Reservation.id == res_id).options(*options)
                 res_by_id = await self.db.execute(stmt_id)
                 r_by_id = res_by_id.scalar_one_or_none()
@@ -673,6 +756,10 @@ class ReservationService:
         if reservation.status == ReservationStatus.CANCELLED:
             raise ValidationException("Vé này đã bị hủy, không thể check-in vào rạp.")
 
+        # BUG-07: Chặn check-in vé chưa thanh toán (PENDING)
+        if reservation.status != ReservationStatus.CONFIRMED:
+            raise ValidationException("Vé chưa được thanh toán, không thể check-in vào rạp.")
+
         if reservation.is_used:
             raise ValidationException(f"Vé này đã được quét check-in từ trước vào lúc {reservation.checked_in_at.strftime('%H:%M %d/%m/%Y') if reservation.checked_in_at else ''}.")
 
@@ -697,8 +784,6 @@ class ReservationService:
         """
         vnp_params = vnp_params or {}
         reservation = await self.get_reservation(reservation_id)
-        if not reservation:
-            raise NotFoundException(f"Reservation {reservation_id} not found")
 
         if reservation.status == ReservationStatus.CONFIRMED:
             return reservation  # Already confirmed (e.g., IPN vs Return callback race)
@@ -842,8 +927,6 @@ class ReservationService:
         and log failed PaymentTransaction.
         """
         reservation = await self.get_reservation(reservation_id)
-        if not reservation:
-            raise NotFoundException(f"Reservation {reservation_id} not found")
 
         if reservation.status == ReservationStatus.CONFIRMED:
             return reservation  # Cannot cancel an already confirmed payment
@@ -870,6 +953,13 @@ class ReservationService:
                 ss.held_until = None
                 self.db.add(ss)
                 freed_seat_ids.append(ss.seat_id)
+
+        # BUG-08: Release voucher redemption so user gets voucher back
+        from sqlalchemy import delete
+        from app.models.voucher import VoucherRedemption
+        await self.db.execute(
+            delete(VoucherRedemption).where(VoucherRedemption.reservation_id == reservation.id)
+        )
 
         # Invalidate cached seat map & broadcast real-time event
         if reservation.showtime_id:
