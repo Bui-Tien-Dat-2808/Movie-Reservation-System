@@ -202,6 +202,18 @@ async def vnpay_ipn(
     if reservation.status == ReservationStatus.CONFIRMED:
         return JSONResponse(content={"RspCode": "02", "Message": "Order already confirmed"})
 
+    # VNPay IPN Spec: Check amount (Rule 04)
+    expected_amount = int(reservation.total_price * 100)
+    vnp_amount = int(query_params.get("vnp_Amount", 0))
+    if vnp_amount != expected_amount:
+        logger.warning(
+            "vnpay_ipn_invalid_amount",
+            reservation_id=reservation_id,
+            expected=expected_amount,
+            received=vnp_amount,
+        )
+        return JSONResponse(content={"RspCode": "04", "Message": "Invalid Amount"})
+
     if response_code == "00":
         await service.confirm_payment_success(reservation_id, query_params)
         return JSONResponse(content={"RspCode": "00", "Message": "Confirm Success"})

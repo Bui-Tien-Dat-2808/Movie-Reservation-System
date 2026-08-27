@@ -9,6 +9,7 @@ from app.core.exceptions import (
     InvalidCredentialsException,
     NotFoundException,
     TokenExpiredException,
+    ValidationException,
 )
 from app.core.security import (
     create_access_token,

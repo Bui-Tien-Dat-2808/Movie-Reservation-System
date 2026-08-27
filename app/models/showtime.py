@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -18,6 +18,10 @@ class ShowtimeStatus(str, enum.Enum):
 
 class Showtime(Base):
     __tablename__ = "showtimes"
+    __table_args__ = (
+        Index("ix_showtimes_movie_start_status", "movie_id", "start_time", "status"),
+        Index("ix_showtimes_room_start", "room_id", "start_time"),
+    )
 
     movie_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("movies.id", ondelete="CASCADE"), nullable=False

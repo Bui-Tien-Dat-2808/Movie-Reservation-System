@@ -169,7 +169,39 @@ class RefundService:
             return resp.json()
 
     async def get_refund(self, refund_id: int) -> RefundTransaction:
-        """Fetch refund transaction by ID."""
+        """Fetch refund transaction by ID. If virtual ID >= 9000000, materialize it into real RefundTransaction."""
+        if refund_id >= 9000000:
+            res_id = refund_id - 9000000
+            res_result = await self.db.execute(
+                select(Reservation)
+                .where(Reservation.id == res_id)
+                .options(
+                    selectinload(Reservation.user),
+                    selectinload(Reservation.showtime).selectinload(Showtime.movie),
+                    selectinload(Reservation.payment_transactions),
+                )
+            )
+            reservation = res_result.scalar_one_or_none()
+            if not reservation:
+                raise NotFoundException("Yêu cầu hoàn tiền không tồn tại")
+
+            pt_id = 0
+            if reservation.payment_transactions:
+                pt_id = reservation.payment_transactions[0].id
+
+            new_refund = RefundTransaction(
+                reservation_id=reservation.id,
+                payment_transaction_id=pt_id,
+                amount=reservation.total_price,
+                vnp_request_id=f"CASH_{reservation.id}_{int(datetime.now(timezone.utc).timestamp())}",
+                status="success",
+                admin_note=f"Vé tiền mặt - {reservation.notes or 'Hủy vé'}",
+            )
+            self.db.add(new_refund)
+            await self.db.flush()
+            await self.db.refresh(new_refund)
+            return new_refund
+
         result = await self.db.execute(
             select(RefundTransaction)
             .where(RefundTransaction.id == refund_id)

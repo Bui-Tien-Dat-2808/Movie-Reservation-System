@@ -126,7 +126,8 @@ class ReservationService:
                     continue
                 concession = concessions_map.get(c_item.concession_id)
                 if concession and concession.is_active:
-                    unit_price = Decimal(str(c_item.unit_price)) if (c_item.unit_price is not None and c_item.unit_price > 0) else concession.price
+                    # SEC-CRIT-01: Always fetch verified unit price from database, never trust client-provided unit_price
+                    unit_price = concession.price
                     subtotal += unit_price * c_item.quantity
                     concessions_to_create.append(
                         ReservationConcession(

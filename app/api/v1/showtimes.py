@@ -1,8 +1,11 @@
+from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.utils.datetime_utils import ensure_utc
 
 from app.dependencies import get_current_active_user, get_db, get_redis, require_admin
 from app.websocket.seat_manager import seat_connection_manager
@@ -256,7 +259,7 @@ async def hold_seats(
         raise NotFoundException("Showtime", showtime_id)
 
     # Ensure showtime is in the future
-    if showtime.start_time.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+    if ensure_utc(showtime.start_time) < datetime.now(timezone.utc):
         raise ShowtimePastException()
 
     # 2. Lock requested ShowtimeSeats with SELECT FOR UPDATE.

@@ -176,9 +176,15 @@ async def forgot_password(
     client_origin = None
     if origin:
         from urllib.parse import urlparse
+        from app.config import settings
         parsed = urlparse(origin)
         if parsed.scheme and parsed.netloc:
-            client_origin = f"{parsed.scheme}://{parsed.netloc}"
+            candidate = f"{parsed.scheme}://{parsed.netloc}"
+            allowed_origins = [o.rstrip("/") for o in (settings.CORS_ORIGINS or [])]
+            if settings.FRONTEND_BASE_URL:
+                allowed_origins.append(settings.FRONTEND_BASE_URL.rstrip("/"))
+            if candidate in allowed_origins:
+                client_origin = candidate
 
     service = AuthService(db, CacheService(redis))
     await service.forgot_password(data.email, client_origin=client_origin)

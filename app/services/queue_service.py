@@ -185,8 +185,6 @@ class QueueService:
             return True
 
         if token:
-            if token.startswith("bypass_"):
-                return True
             token_key = self._get_token_key(showtime_id, user_id)
             stored_token = await self.redis.get(token_key)
             if stored_token and stored_token == token:

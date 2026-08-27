@@ -34,7 +34,7 @@ class Room(Base):
 
     # Relationships
     seats: Mapped[List["Seat"]] = relationship(
-        "Seat", back_populates="room", cascade="all, delete-orphan"
+        "Seat", back_populates="room", cascade="all, delete-orphan", order_by="Seat.row_label, Seat.col_number"
     )
     showtimes: Mapped[List["Showtime"]] = relationship(  # noqa: F821
         "Showtime", back_populates="room"

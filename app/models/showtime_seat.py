@@ -1,7 +1,7 @@
 import enum
 from typing import Optional
 from datetime import datetime
-from sqlalchemy import Enum, ForeignKey, Integer, UniqueConstraint, DateTime
+from sqlalchemy import Enum, ForeignKey, Integer, UniqueConstraint, DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -19,6 +19,8 @@ class ShowtimeSeat(Base):
     __tablename__ = "showtime_seats"
     __table_args__ = (
         UniqueConstraint("showtime_id", "seat_id", name="uq_showtime_seat"),
+        Index("ix_showtime_seats_status_held_until", "status", "held_until"),
+        Index("ix_showtime_seats_showtime_status", "showtime_id", "status"),
     )
 
     showtime_id: Mapped[int] = mapped_column(

@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -18,6 +18,10 @@ class ReservationStatus(str, enum.Enum):
 
 class Reservation(Base):
     __tablename__ = "reservations"
+    __table_args__ = (
+        Index("ix_reservations_user_status_created", "user_id", "status", "created_at"),
+        Index("ix_reservations_showtime_status", "showtime_id", "status"),
+    )
 
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False

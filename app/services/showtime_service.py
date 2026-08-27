@@ -12,6 +12,7 @@ from app.models.movie import Movie, MovieGenre, MovieStatus
 from app.models.seat import Seat
 from app.models.showtime import Showtime, ShowtimeStatus
 from app.models.showtime_seat import ShowtimeSeat, SeatStatus
+from app.models.reservation import Reservation, ReservationStatus
 from app.models.room import Room, RoomType
 from app.schemas.showtime import ShowtimeCreate, ShowtimeUpdate
 from app.services.cache_service import CacheService
@@ -270,12 +271,22 @@ class ShowtimeService:
         return await self.get_showtime(showtime_id)
 
     async def cancel_showtime(self, showtime_id: int) -> Showtime:
-        """Cancel a showtime."""
+        """Cancel a showtime and its active reservations."""
         showtime = await self.get_showtime(showtime_id)
         showtime.status = ShowtimeStatus.CANCELLED
+
+        # Cancel any active reservations for this showtime
+        res_stmt = select(Reservation).where(
+            Reservation.showtime_id == showtime_id,
+            Reservation.status.in_([ReservationStatus.PENDING, ReservationStatus.CONFIRMED]),
+        )
+        res_objs = (await self.db.execute(res_stmt)).scalars().all()
+        for r in res_objs:
+            r.status = ReservationStatus.CANCELLED
+
         await self.db.flush()
         await self.cache.delete_pattern("showtimes:*")
-        logger.info("Showtime cancelled", showtime_id=showtime_id)
+        logger.info("Showtime cancelled", showtime_id=showtime_id, cancelled_reservations=len(res_objs))
         return showtime
 
     async def bulk_cancel_showtimes(
@@ -311,8 +322,19 @@ class ShowtimeService:
         showtimes = res.scalars().all()
         count = len(showtimes)
 
+        st_ids = [st.id for st in showtimes]
         for st in showtimes:
             st.status = ShowtimeStatus.CANCELLED
+
+        # Cancel any active reservations for these showtimes
+        if st_ids:
+            res_stmt = select(Reservation).where(
+                Reservation.showtime_id.in_(st_ids),
+                Reservation.status.in_([ReservationStatus.PENDING, ReservationStatus.CONFIRMED]),
+            )
+            res_objs = (await self.db.execute(res_stmt)).scalars().all()
+            for r in res_objs:
+                r.status = ReservationStatus.CANCELLED
 
         await self.db.commit()
         await self.cache.delete_pattern("showtimes:*")
@@ -321,19 +343,24 @@ class ShowtimeService:
         return count
 
     async def get_seat_map(self, showtime_id: int) -> dict:
-        """Get seat availability map for a showtime, with auto-healing for missing seat slots."""
+        """Get seat availability map for a showtime, with auto-healing for missing or desynced seat slots."""
         showtime = await self.get_showtime(showtime_id)
 
-        # Auto-heal: If showtime has no showtime_seats generated, create them from room seats
-        if not showtime.showtime_seats:
-            for seat in showtime.room.seats:
-                if seat.is_active:
-                    st_seat = ShowtimeSeat(
-                        showtime_id=showtime.id,
-                        seat_id=seat.id,
-                        status=SeatStatus.AVAILABLE,
-                    )
-                    self.db.add(st_seat)
+        # Auto-heal: If showtime has no showtime_seats generated or desynced from room layout
+        active_room_seats = [s for s in (showtime.room.seats or []) if s.is_active] if showtime.room else []
+        has_orphaned = any(ss.seat is None for ss in (showtime.showtime_seats or []))
+        is_mismatched = len(showtime.showtime_seats or []) != len(active_room_seats)
+
+        if (not showtime.showtime_seats or has_orphaned or is_mismatched) and active_room_seats:
+            from sqlalchemy import delete
+            await self.db.execute(delete(ShowtimeSeat).where(ShowtimeSeat.showtime_id == showtime.id))
+            for seat in active_room_seats:
+                st_seat = ShowtimeSeat(
+                    showtime_id=showtime.id,
+                    seat_id=seat.id,
+                    status=SeatStatus.AVAILABLE,
+                )
+                self.db.add(st_seat)
             await self.db.flush()
             await self.db.commit()
             showtime = await self.get_showtime(showtime_id)
@@ -368,6 +395,8 @@ class ShowtimeService:
         if needs_flush:
             await self.db.flush()
             await self.db.commit()
+
+        seats.sort(key=lambda s: (getattr(s.seat, 'row_label', '') if s.seat else '', getattr(s.seat, 'col_number', 0) if s.seat else 0))
 
         return {
             "showtime_id": showtime_id,
@@ -741,8 +770,17 @@ class ShowtimeService:
             for old_st in old_sts:
                 old_st.status = ShowtimeStatus.CANCELLED
             if old_sts:
+                old_st_ids = [st.id for st in old_sts]
+                res_stmt = select(Reservation).where(
+                    Reservation.showtime_id.in_(old_st_ids),
+                    Reservation.status.in_([ReservationStatus.PENDING, ReservationStatus.CONFIRMED]),
+                )
+                res_objs = (await self.db.execute(res_stmt)).scalars().all()
+                for r in res_objs:
+                    r.status = ReservationStatus.CANCELLED
+
                 await self.db.flush()
-                logger.info("Replaced existing showtimes", cancelled_count=len(old_sts))
+                logger.info("Replaced existing showtimes", cancelled_count=len(old_sts), cancelled_reservations=len(res_objs))
 
         # Pre-fetch all rooms with active seats into a dictionary map for high performance
         all_room_ids = list({item.room_id for item in showtimes_data})

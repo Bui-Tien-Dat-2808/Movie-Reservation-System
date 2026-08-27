@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.security import verify_access_token
 from app.db.session import AsyncSessionLocal
-from app.models.user import UserRole
+from app.models.user import User, UserRole
 
 logger = structlog.get_logger()
 
@@ -126,14 +126,15 @@ async def require_staff_or_admin(current_user=Depends(get_current_user)):
 
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    token: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     redis=Depends(get_redis),
-):
+) -> Optional[User]:
     """Optional auth dependency returning None if not logged in."""
-    if credentials is None:
+    if credentials is None and token is None:
         return None
     try:
-        return await get_current_user(credentials, db, redis)
+        return await get_current_user(credentials=credentials, token=token, db=db, redis=redis)
     except HTTPException:
         return None
 

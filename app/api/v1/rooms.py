@@ -341,6 +341,186 @@ async def create_room(
     return result.scalar_one()
 
 
+class CustomSeatItem(BaseModel):
+    row_label: str
+    col_number: int
+    seat_type: SeatType
+    is_active: bool = True
+
+
+class BatchRoomLayoutApplyRequest(BaseModel):
+    room_ids: List[int]
+    total_rows: int
+    total_cols: int
+    custom_seats: Optional[List[CustomSeatItem]] = None
+
+
+@router.put("/batch-layout", summary="Batch update layout and seat types for selected rooms (Admin)")
+async def batch_update_room_layout(
+    data: BatchRoomLayoutApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+    _=Depends(require_admin),
+):
+    """
+    Admin: Update total_rows, total_cols, and seat configurations for selected room IDs.
+    If custom_seats is provided, uses the exact custom layout; otherwise generates standard seats based on room_type.
+    """
+    from app.core.exceptions import BadRequestException, ConflictException
+    from sqlalchemy import delete
+
+    if not data.room_ids:
+        raise BadRequestException("Vui lòng chọn ít nhất một phòng chiếu để áp dụng sơ đồ ghế.")
+    if data.total_rows < 4 or data.total_rows > 20:
+        raise BadRequestException("Số hàng ghế (Rows) phải từ 4 đến 20.")
+    if data.total_cols < 4 or data.total_cols > 25:
+        raise BadRequestException("Số cột ghế (Cols) phải từ 4 đến 25.")
+
+    rooms_res = await db.execute(
+        select(Room).where(Room.id.in_(data.room_ids)).options(selectinload(Room.seats))
+    )
+    rooms = rooms_res.scalars().all()
+    if not rooms:
+        raise BadRequestException("Không tìm thấy phòng chiếu nào tương ứng với danh sách đã chọn.")
+
+    # Guard: Check for active upcoming showtimes
+    now = datetime.now(timezone.utc)
+    active_st_res = await db.execute(
+        select(Room.name)
+        .join(Showtime, Showtime.room_id == Room.id)
+        .where(
+            Room.id.in_([r.id for r in rooms]),
+            Showtime.status != ShowtimeStatus.CANCELLED,
+            Showtime.end_time > now,
+        )
+    )
+    conflicting_names = list(set(active_st_res.scalars().all()))
+    if conflicting_names:
+        raise ConflictException(
+            f"Không thể thay đổi sơ đồ ghế vì các phòng sau đang có suất chiếu sắp tới: {', '.join(conflicting_names)}. "
+            f"Vui lòng hủy hoặc đợi các suất chiếu kết thúc trước khi cập nhật sơ đồ ghế."
+        )
+
+    updated_count = 0
+    for room in rooms:
+        room.total_rows = data.total_rows
+        room.total_cols = data.total_cols
+
+        # Delete old seats for this room
+        await db.execute(delete(Seat).where(Seat.room_id == room.id))
+
+        if data.custom_seats and len(data.custom_seats) > 0:
+            for s in data.custom_seats:
+                db.add(Seat(
+                    room_id=room.id,
+                    row_label=s.row_label,
+                    col_number=s.col_number,
+                    seat_type=s.seat_type,
+                    width=2 if s.seat_type == SeatType.COUPLE else 1,
+                    is_active=s.is_active,
+                ))
+        else:
+            await _generate_seats(db, room)
+
+        updated_count += 1
+
+    await db.commit()
+    await CacheService(redis).delete_pattern("rooms:*")
+
+    room_names_str = ", ".join(r.name for r in rooms[:3])
+    extra = f" và {len(rooms) - 3} phòng khác" if len(rooms) > 3 else ""
+
+    return {
+        "message": f"Đã áp dụng sơ đồ ghế ({data.total_rows} hàng × {data.total_cols} cột) thành công cho {updated_count} phòng ({room_names_str}{extra})!",
+        "updated_count": updated_count,
+        "room_ids": [r.id for r in rooms],
+        "total_rows": data.total_rows,
+        "total_cols": data.total_cols,
+    }
+
+
+class RoomTypeLayoutUpdate(BaseModel):
+    room_type: RoomType
+    total_rows: int
+    total_cols: int
+
+
+@router.put("/room-type-layout", summary="Update rows and columns layout for all rooms of a specific room type (Admin)")
+async def update_room_type_layout(
+    data: RoomTypeLayoutUpdate,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+    _=Depends(require_admin),
+):
+    """
+    Admin: Update total_rows and total_cols for all screening rooms belonging to a specific room_type.
+    Regenerates the seat layout accordingly.
+    """
+    from app.core.exceptions import BadRequestException, ConflictException
+    from sqlalchemy import delete
+
+    if data.total_rows < 4 or data.total_rows > 20:
+        raise BadRequestException("Số hàng ghế (Rows) phải từ 4 đến 20.")
+    if data.total_cols < 4 or data.total_cols > 25:
+        raise BadRequestException("Số cột ghế (Cols) phải từ 4 đến 25.")
+
+    rooms_res = await db.execute(
+        select(Room).where(Room.room_type == data.room_type).options(selectinload(Room.seats))
+    )
+    rooms = rooms_res.scalars().all()
+    if not rooms:
+        raise BadRequestException(f"Không tìm thấy phòng chiếu nào thuộc loại '{data.room_type.value}'.")
+
+    # Guard: Check for active upcoming showtimes
+    now = datetime.now(timezone.utc)
+    active_st_res = await db.execute(
+        select(Room.name)
+        .join(Showtime, Showtime.room_id == Room.id)
+        .where(
+            Room.id.in_([r.id for r in rooms]),
+            Showtime.status != ShowtimeStatus.CANCELLED,
+            Showtime.end_time > now,
+        )
+    )
+    conflicting_names = list(set(active_st_res.scalars().all()))
+    if conflicting_names:
+        raise ConflictException(
+            f"Không thể thay đổi cấu trúc loại phòng '{data.room_type.value}' vì các phòng sau đang có suất chiếu sắp tới: {', '.join(conflicting_names)}. "
+            f"Vui lòng hủy hoặc đợi các suất chiếu kết thúc trước khi cập nhật."
+        )
+
+    updated_count = 0
+    for room in rooms:
+        room.total_rows = data.total_rows
+        room.total_cols = data.total_cols
+
+        # Delete old seats for this room and regenerate
+        await db.execute(delete(Seat).where(Seat.room_id == room.id))
+        await _generate_seats(db, room)
+        updated_count += 1
+
+    await db.commit()
+    await CacheService(redis).delete_pattern("rooms:*")
+
+    type_names = {
+        RoomType.STANDARD: "Standard",
+        RoomType.VIP: "VIP Gold Lounge",
+        RoomType.IMAX: "IMAX 3D Laser",
+        RoomType.THREE_D: "3D Surround",
+        RoomType.FOUR_D: "4DX Motion",
+        RoomType.KIDS: "Kids / Gia Đình",
+    }
+    display_type = type_names.get(data.room_type, data.room_type.value)
+
+    return {
+        "message": f"Đã cập nhật cấu trúc {data.total_rows} hàng × {data.total_cols} cột cho toàn bộ {updated_count} phòng loại '{display_type}' thành công!",
+        "updated_count": updated_count,
+        "room_type": data.room_type.value,
+        "total_rows": data.total_rows,
+        "total_cols": data.total_cols,
+    }
+
+
 @router.put("/{room_id}", response_model=RoomResponse, summary="Update room (Admin)")
 async def update_room(
     room_id: int,

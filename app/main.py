@@ -26,8 +26,10 @@ async def periodic_reservation_cleanup():
             from app.db.session import AsyncSessionLocal
             from app.services.reservation_service import ReservationService
             from app.services.cache_service import CacheService
+            from app.dependencies import get_redis
+            redis_client = await get_redis()
             async with AsyncSessionLocal() as db:
-                service = ReservationService(db, CacheService(None))
+                service = ReservationService(db, CacheService(redis_client))
                 cancelled_count = await service.cleanup_expired_pending_reservations()
                 if cancelled_count > 0:
                     logger.info("expired_reservations_cleaned_up", count=cancelled_count)
@@ -50,9 +52,11 @@ async def periodic_movie_sync():
             from app.db.session import AsyncSessionLocal
             from app.services.movie_service import MovieService
             from app.services.cache_service import CacheService
+            from app.dependencies import get_redis
 
+            redis_client = await get_redis()
             async with AsyncSessionLocal() as db:
-                service = MovieService(db, CacheService(None))
+                service = MovieService(db, CacheService(redis_client))
                 result = await service.auto_update_movie_statuses()
                 logger.info("Periodic movie status update completed", changes=result)
 
@@ -130,7 +134,7 @@ Authorization: Bearer <access_token>
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins_list,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|.*)(:\d+)?$",
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
