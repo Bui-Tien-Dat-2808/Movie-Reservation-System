@@ -328,7 +328,7 @@ async def hold_seats(
         ss.held_by = user.id
         ss.held_until = held_until
 
-    await db.flush()
+    await db.commit()
 
     # Real-time Broadcast: Notify all connected clients that these seats were held
     await seat_connection_manager.broadcast(
@@ -358,21 +358,25 @@ async def release_seats(
 ):
     """
     Release seats held by the current user when cancelling booking or leaving checkout.
+    Supports both seat_id and showtime_seat.id.
     """
-    from sqlalchemy import select
+    from sqlalchemy import select, or_
     from app.models.showtime_seat import ShowtimeSeat, SeatStatus
 
     result = await db.execute(
         select(ShowtimeSeat).where(
             ShowtimeSeat.showtime_id == showtime_id,
-            ShowtimeSeat.seat_id.in_(data.seat_ids),
+            or_(
+                ShowtimeSeat.seat_id.in_(data.seat_ids),
+                ShowtimeSeat.id.in_(data.seat_ids),
+            )
         )
     )
     seats = result.scalars().all()
     freed_seat_ids = []
 
     for ss in seats:
-        if ss.held_by == user.id or getattr(user, "role", None) == "admin":
+        if ss.held_by == user.id or getattr(user, "role", None) == "admin" or ss.held_by is None:
             if ss.status != SeatStatus.BOOKED:
                 ss.status = SeatStatus.AVAILABLE
                 ss.held_by = None
@@ -385,6 +389,7 @@ async def release_seats(
     # Clear Redis Cache
     cache = CacheService(redis)
     await cache.delete_pattern(f"showtimes:seats:{showtime_id}")
+    await cache.delete_pattern(f"showtimes:*")
 
     # Broadcast real-time SEATS_RELEASED event to WebSockets
     if freed_seat_ids:

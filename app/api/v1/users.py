@@ -134,4 +134,15 @@ async def deactivate_user(
 
     user.is_active = False
     await db.commit()
+
+    from app.dependencies import get_redis
+    from app.services.cache_service import CacheService
+    # Invalidate all user sessions immediately
+    try:
+        from app.dependencies import _redis_client
+        if _redis_client:
+            await CacheService(_redis_client).invalidate_all_user_tokens(user_id)
+    except Exception as e:
+        logger.warning("failed_to_invalidate_user_tokens", user_id=user_id, error=str(e))
+
     logger.info("User deactivated", user_id=user_id)

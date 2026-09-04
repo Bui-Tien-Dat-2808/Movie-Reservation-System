@@ -138,34 +138,78 @@ class ReservationService:
                         )
                     )
 
-        # Process voucher discount if provided
-        voucher_code = None
-        discount_amount = Decimal("0.00")
+        # Apply voucher discount if provided (supports multiple voucher codes)
         final_total = subtotal
-        matched_voucher = None
+        voucher_code = None
+        discount_amount = Decimal("0")
+        matched_vouchers = []
+        from app.services.voucher_service import VoucherService
+        voucher_service = VoucherService(self.db)
 
-        if data.voucher_code:
-            from app.services.voucher_service import VoucherService
-            voucher_service = VoucherService(self.db)
-            matched_voucher, disc_val, final_val = await voucher_service.validate_and_calculate_discount(
-                data.voucher_code, float(subtotal), user_id=user_id
-            )
-            voucher_code = matched_voucher.code
-            discount_amount = Decimal(str(round(disc_val, 2)))
-            final_total = Decimal(str(round(final_val, 2)))
+        if data.voucher_code and data.voucher_code.strip():
+            raw_codes = [c.strip() for c in data.voucher_code.split(",") if c.strip()]
+            running_subtotal = float(subtotal)
+            total_discount = 0.0
+            valid_codes = []
 
-        # Cancel any previous PENDING reservations for this user on this showtime to avoid duplicate pending orders
+            for code in raw_codes:
+                try:
+                    matched_v, disc_val, _ = await voucher_service.validate_and_calculate_discount(
+                        code=code,
+                        total_amount=running_subtotal,
+                        user_id=user_id,
+                    )
+                    matched_vouchers.append(matched_v)
+                    valid_codes.append(matched_v.code)
+                    total_discount += disc_val
+                    running_subtotal = max(0.0, running_subtotal - disc_val)
+                except Exception:
+                    continue
+
+            if valid_codes:
+                voucher_code = ",".join(valid_codes)
+                discount_amount = Decimal(str(round(total_discount, 2)))
+                final_val = max(0.0, float(subtotal) - total_discount)
+                final_total = Decimal(str(round(final_val, 2)))
+
+        # Cancel any previous PENDING reservations for this user on this showtime & release old held seats and vouchers
         existing_pending = await self.db.execute(
-            select(Reservation).where(
+            select(Reservation)
+            .where(
                 Reservation.user_id == user_id,
                 Reservation.showtime_id == data.showtime_id,
                 Reservation.status == ReservationStatus.PENDING,
             )
+            .options(selectinload(Reservation.reservation_seats))
         )
+        new_seat_ids_set = set(data.seat_ids)
         for old_res in existing_pending.scalars().all():
             old_res.status = ReservationStatus.CANCELLED
             old_res.notes = "Đã hủy: Thay thế bởi đơn thanh toán mới"
             self.db.add(old_res)
+
+            # Delete old voucher redemption if any
+            from app.models.voucher import VoucherRedemption
+            await self.db.execute(
+                delete(VoucherRedemption).where(VoucherRedemption.reservation_id == old_res.id)
+            )
+
+            # Release old seats that are not part of the new order
+            for rs in old_res.reservation_seats:
+                st_seat_res = await self.db.execute(
+                    select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id)
+                )
+                old_st_seat = st_seat_res.scalar_one_or_none()
+                if old_st_seat and old_st_seat.seat_id not in new_seat_ids_set and old_st_seat.status != SeatStatus.BOOKED:
+                    old_st_seat.status = SeatStatus.AVAILABLE
+                    old_st_seat.held_by = None
+                    old_st_seat.held_until = None
+                    self.db.add(old_st_seat)
+
+        # Determine payment method
+        req_pm = (getattr(data, "payment_method", "vnpay") or "vnpay").lower()
+        res_notes = "Thanh toán tiền mặt tại quầy" if req_pm == "cash" else None
+        res_status = ReservationStatus.CONFIRMED if req_pm == "cash" else ReservationStatus.PENDING
 
         # Create reservation
         reservation = Reservation(
@@ -174,10 +218,28 @@ class ReservationService:
             total_price=final_total,
             voucher_code=voucher_code,
             discount_amount=discount_amount,
-            status=ReservationStatus.PENDING,
+            status=res_status,
+            notes=res_notes,
         )
         self.db.add(reservation)
         await self.db.flush()
+
+        # Record cash payment transaction if payment_method is cash
+        if req_pm == "cash":
+            from app.models.payment import PaymentTransaction
+            cash_tx = PaymentTransaction(
+                reservation_id=reservation.id,
+                amount=final_total,
+                payment_method="cash",
+                bank_code="CASH",
+                card_type="CASH",
+                transaction_no="CASH",
+                vnp_txn_ref=f"CASH_{reservation.id}_{int(now.timestamp())}",
+                status="success",
+                pay_date=now,
+            )
+            self.db.add(cash_tx)
+            await self.db.flush()
 
         # Save reservation concessions
         for rc in concessions_to_create:
@@ -185,19 +247,24 @@ class ReservationService:
             self.db.add(rc)
 
         # Record voucher redemption if applicable
-        if matched_voucher:
+        for matched_v in matched_vouchers:
             await voucher_service.record_redemption(
-                voucher_id=matched_voucher.id,
+                voucher_id=matched_v.id,
                 user_id=user_id,
                 reservation_id=reservation.id,
             )
 
-        # Create reservation seats and keep showtime_seat HELD for 15 mins during payment
+        # Update showtime seats: BOOKED if cash, HELD for 15 mins if online gateway
         pay_held_until = now + timedelta(minutes=15)
         for ss in locked_seats:
-            ss.status = SeatStatus.HELD
-            ss.held_by = user_id
-            ss.held_until = pay_held_until
+            if req_pm == "cash":
+                ss.status = SeatStatus.BOOKED
+                ss.held_by = None
+                ss.held_until = None
+            else:
+                ss.status = SeatStatus.HELD
+                ss.held_by = user_id
+                ss.held_until = pay_held_until
             rs = ReservationSeat(
                 reservation_id=reservation.id,
                 showtime_seat_id=ss.id,
@@ -236,6 +303,7 @@ class ReservationService:
                 .selectinload(Showtime.movie),
                 selectinload(Reservation.showtime)
                 .selectinload(Showtime.room),
+                selectinload(Reservation.payment_transactions),
             )
         )
         full_reservation = result.scalar_one()
@@ -243,11 +311,56 @@ class ReservationService:
         # Invalidate seat cache
         await self.cache.delete_pattern(f"showtimes:seats:{data.showtime_id}")
 
+        # Dispatch Confirmation Email, award points & broadcast for Cash Booking
+        if req_pm == "cash":
+            # Award loyalty points for confirmed cash booking
+            try:
+                from app.services.loyalty_service import LoyaltyService
+                await LoyaltyService.award_points(self.db, full_reservation)
+            except Exception as e:
+                logger.warning("Failed to award points for cash reservation", error=str(e))
+
+            # Broadcast real-time SEATS_BOOKED event
+            try:
+                from app.websocket.seat_manager import seat_connection_manager
+                await seat_connection_manager.broadcast(
+                    showtime_id=data.showtime_id,
+                    event_type="SEATS_BOOKED",
+                    data={"seat_ids": [rs.showtime_seat_id for rs in locked_seats]}
+                )
+            except Exception as e:
+                logger.warning("Failed to broadcast real-time SEATS_BOOKED event", error=str(e))
+
+            # Dispatch Confirmation Email for Cash Booking (Thread-safe)
+            try:
+                user_res = await self.db.execute(select(User).where(User.id == user_id))
+                user_obj = user_res.scalar_one_or_none()
+                if user_obj and user_obj.email:
+                    ticket_code = full_reservation.ticket_code or f"#{full_reservation.id}"
+                    from app.services.email_service import EmailService
+                    html_content = EmailService.build_ticket_email_html(full_reservation)
+                    barcode_bytes = EmailService.generate_barcode_bytes(ticket_code)
+
+                    import asyncio
+                    from app.utils.background import fire_and_forget
+                    fire_and_forget(
+                        asyncio.to_thread(
+                            EmailService.send_ticket_email_raw,
+                            user_obj.email,
+                            ticket_code,
+                            html_content,
+                            barcode_bytes,
+                        )
+                    )
+            except Exception as e:
+                logger.warning("cash_email_dispatch_trigger_failed", reservation_id=reservation.id, error=str(e))
+
         logger.info(
             "Reservation created",
             reservation_id=reservation.id,
             user_id=user_id,
             total_price=str(final_total),
+            payment_method=req_pm,
         )
         return full_reservation
 
@@ -569,16 +682,14 @@ class ReservationService:
         }
 
     async def get_capacity_report(self, pagination: Optional[PaginationParams] = None) -> List[dict]:
-        """Admin: per-showtime capacity and revenue report."""
+        """Admin: per-showtime capacity and revenue report optimized with SQL aggregations."""
+        from sqlalchemy import case, func
+
         query = (
             select(Showtime)
             .options(
                 selectinload(Showtime.movie),
                 selectinload(Showtime.room),
-                selectinload(Showtime.showtime_seats),
-                selectinload(Showtime.reservations).selectinload(
-                    Reservation.reservation_seats
-                ),
             )
             .order_by(Showtime.start_time.desc())
         )
@@ -589,19 +700,53 @@ class ReservationService:
 
         result = await self.db.execute(query)
         showtimes = result.scalars().all()
+        if not showtimes:
+            return []
+
+        st_ids = [st.id for st in showtimes]
+
+        # 1. Batch aggregate seat counts per showtime
+        seat_stats_stmt = (
+            select(
+                ShowtimeSeat.showtime_id,
+                func.count(ShowtimeSeat.id).label("total_seats"),
+                func.sum(
+                    case((ShowtimeSeat.status == SeatStatus.BOOKED, 1), else_=0)
+                ).label("reserved_seats"),
+            )
+            .where(ShowtimeSeat.showtime_id.in_(st_ids))
+            .group_by(ShowtimeSeat.showtime_id)
+        )
+        seat_stats_res = await self.db.execute(seat_stats_stmt)
+        seat_map = {
+            r[0]: (int(r[1] or 0), int(r[2] or 0))
+            for r in seat_stats_res.fetchall()
+        }
+
+        # 2. Batch aggregate confirmed revenue per showtime
+        rev_stmt = (
+            select(
+                Reservation.showtime_id,
+                func.sum(Reservation.total_price).label("revenue"),
+            )
+            .where(
+                Reservation.showtime_id.in_(st_ids),
+                Reservation.status == ReservationStatus.CONFIRMED,
+            )
+            .group_by(Reservation.showtime_id)
+        )
+        rev_res = await self.db.execute(rev_stmt)
+        rev_map = {
+            r[0]: Decimal(str(r[1])) if r[1] is not None else Decimal("0")
+            for r in rev_res.fetchall()
+        }
 
         report = []
         for st in showtimes:
-            total_seats = len(st.showtime_seats)
-            reserved_seats = sum(
-                1 for s in st.showtime_seats if s.status == SeatStatus.BOOKED
-            )
+            total_seats, reserved_seats = seat_map.get(st.id, (0, 0))
             available_seats = total_seats - reserved_seats
-            occupancy_rate = (reserved_seats / total_seats * 100) if total_seats > 0 else 0
-            revenue = sum(
-                r.total_price for r in st.reservations
-                if r.status == ReservationStatus.CONFIRMED
-            )
+            occupancy_rate = (reserved_seats / total_seats * 100) if total_seats > 0 else 0.0
+            revenue = rev_map.get(st.id, Decimal("0"))
 
             report.append({
                 "showtime_id": st.id,
@@ -612,7 +757,7 @@ class ReservationService:
                 "reserved_seats": reserved_seats,
                 "available_seats": available_seats,
                 "occupancy_rate": round(occupancy_rate, 2),
-                "revenue": revenue or Decimal("0"),
+                "revenue": revenue,
             })
 
         return report
@@ -839,7 +984,13 @@ class ReservationService:
         card_type = "CASH" if payment_method == "cash" else vnp_params.get("vnp_CardType")
 
         existing_tx_result = await self.db.execute(
-            select(PaymentTransaction).where(PaymentTransaction.vnp_txn_ref == vnp_txn_ref)
+            select(PaymentTransaction).where(
+                (PaymentTransaction.vnp_txn_ref == vnp_txn_ref)
+                | (
+                    (PaymentTransaction.reservation_id == reservation.id)
+                    & (PaymentTransaction.payment_method == "cash")
+                )
+            )
         )
         existing_tx = existing_tx_result.scalar_one_or_none()
 

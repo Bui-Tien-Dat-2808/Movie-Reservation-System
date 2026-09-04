@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Tuple, List
 from fastapi import HTTPException, status
 from pydantic import BaseModel
@@ -53,8 +53,8 @@ class VoucherService:
                 detail=f"Mã giảm giá '{code}' không hợp lệ hoặc đã bị vô hiệu hóa.",
             )
 
-        # 1. Expiry date check
-        today = date.today()
+        # 1. Expiry date check (Vietnam GMT+7 timezone)
+        today = datetime.now(timezone(timedelta(hours=7))).date()
         if voucher.expiry_date and voucher.expiry_date < today:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

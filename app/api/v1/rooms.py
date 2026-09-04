@@ -26,71 +26,124 @@ logger = structlog.get_logger()
 CACHE_KEY_ROOMS_PREFIX = "rooms:list"
 
 
-async def _generate_seats(db: AsyncSession, room: Room, couple_rows: int = 1) -> None:
-    """Auto-generate realistic cinema seat layout based on room_type."""
-    row_labels = list(string.ascii_uppercase)  # A-Z
+def _get_default_target_seats(room: Room) -> List[dict]:
+    """Calculate default seat specs for a room based on room_type."""
+    row_labels = list(string.ascii_uppercase)
     total_rows = room.total_rows
     total_cols = room.total_cols
     r_type = room.room_type if isinstance(room.room_type, RoomType) else RoomType(room.room_type)
+    results: List[dict] = []
 
     for row_idx in range(total_rows):
         row_label = row_labels[row_idx] if row_idx < 26 else f"A{row_idx - 25}"
 
-        # 1. STANDARD ROOM: All Regular/Standard seats (0 VIP, 0 Couple)
         if r_type == RoomType.STANDARD:
             for col in range(1, total_cols + 1):
-                db.add(Seat(
-                    room_id=room.id,
-                    row_label=row_label,
-                    col_number=col,
-                    seat_type=SeatType.STANDARD,
-                    width=1,
-                    is_active=True,
-                ))
-
-        # 2. VIP ROOM: Premium (Rows B-C middle = Couple, rest = VIP)
+                results.append({
+                    "row_label": row_label,
+                    "col_number": col,
+                    "seat_type": SeatType.STANDARD,
+                    "width": 1,
+                    "is_active": True,
+                })
         elif r_type == RoomType.VIP:
-            if row_idx in (1, 2):  # Rows B, C
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=1, seat_type=SeatType.VIP, width=1, is_active=True))
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=2, seat_type=SeatType.VIP, width=1, is_active=True))
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=3, seat_type=SeatType.COUPLE, width=2, is_active=True))
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=4, seat_type=SeatType.COUPLE, width=2, is_active=True))
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=7, seat_type=SeatType.VIP, width=1, is_active=True))
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=8, seat_type=SeatType.VIP, width=1, is_active=True))
-            else:  # Rows A, D
+            if row_idx in (1, 2):
+                results.append({"row_label": row_label, "col_number": 1, "seat_type": SeatType.VIP, "width": 1, "is_active": True})
+                results.append({"row_label": row_label, "col_number": 2, "seat_type": SeatType.VIP, "width": 1, "is_active": True})
+                results.append({"row_label": row_label, "col_number": 3, "seat_type": SeatType.COUPLE, "width": 2, "is_active": True})
+                results.append({"row_label": row_label, "col_number": 4, "seat_type": SeatType.COUPLE, "width": 2, "is_active": True})
+                results.append({"row_label": row_label, "col_number": 7, "seat_type": SeatType.VIP, "width": 1, "is_active": True})
+                results.append({"row_label": row_label, "col_number": 8, "seat_type": SeatType.VIP, "width": 1, "is_active": True})
+            else:
                 for col in range(1, total_cols + 1):
-                    db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=SeatType.VIP, width=1, is_active=True))
-
-        # 3. IMAX ROOM: Rows C-E = VIP (center sweet spot), Rows A-B & F-H = Regular
+                    results.append({"row_label": row_label, "col_number": col, "seat_type": SeatType.VIP, "width": 1, "is_active": True})
         elif r_type == RoomType.IMAX:
-            is_vip = 2 <= row_idx <= 4  # Rows C, D, E
+            is_vip = 2 <= row_idx <= 4
             s_type = SeatType.VIP if is_vip else SeatType.STANDARD
             for col in range(1, total_cols + 1):
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=s_type, width=1, is_active=True))
-
-        # 4. 3D ROOM: Rows C-D = VIP (center), Rows A-B & E-F = Regular
+                results.append({"row_label": row_label, "col_number": col, "seat_type": s_type, "width": 1, "is_active": True})
         elif r_type == RoomType.THREE_D:
-            is_vip = 2 <= row_idx <= 3  # Rows C, D
+            is_vip = 2 <= row_idx <= 3
             s_type = SeatType.VIP if is_vip else SeatType.STANDARD
             for col in range(1, total_cols + 1):
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=s_type, width=1, is_active=True))
-
-        # 5. KIDS ROOM: Rows A-F = KIDS seats, Rows G-H = Standard seats for parents (0 Couple seats)
+                results.append({"row_label": row_label, "col_number": col, "seat_type": s_type, "width": 1, "is_active": True})
         elif r_type == RoomType.KIDS:
-            if row_idx >= 6:  # Rows G, H (back rows for parents/accompanying adults)
+            if row_idx >= 6:
                 for col in range(1, total_cols + 1):
-                    db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=SeatType.STANDARD, width=1, is_active=True))
-            else:  # Rows A-F
+                    results.append({"row_label": row_label, "col_number": col, "seat_type": SeatType.STANDARD, "width": 1, "is_active": True})
+            else:
                 for col in range(1, total_cols + 1):
-                    db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=SeatType.KIDS, width=1, is_active=True))
-
-        # Fallback for 4DX or custom rooms
+                    results.append({"row_label": row_label, "col_number": col, "seat_type": SeatType.KIDS, "width": 1, "is_active": True})
         else:
             is_vip_row = total_rows // 3 <= row_idx < 2 * total_rows // 3
             for col in range(1, total_cols + 1):
-                db.add(Seat(room_id=room.id, row_label=row_label, col_number=col, seat_type=SeatType.VIP if is_vip_row else SeatType.STANDARD, width=1, is_active=True))
+                results.append({"row_label": row_label, "col_number": col, "seat_type": SeatType.VIP if is_vip_row else SeatType.STANDARD, "width": 1, "is_active": True})
+
+    return results
+
+
+async def _sync_room_seats(db: AsyncSession, room: Room, target_seats: List[dict]) -> None:
+    """
+    Safely sync room seats without breaking historical showtime/reservation references.
+    If the room has any showtimes (past or present), existing seats are preserved/updated,
+    missing seats are deactivated, and new seats are added. Only rooms with 0 showtimes
+    are hard deleted.
+    """
+    from sqlalchemy import delete, func as sqla_func
+
+    st_count_res = await db.execute(
+        select(sqla_func.count(Showtime.id)).where(Showtime.room_id == room.id)
+    )
+    has_history = (st_count_res.scalar_one() or 0) > 0
+
+    if not has_history:
+        await db.execute(delete(Seat).where(Seat.room_id == room.id))
+        for ts in target_seats:
+            db.add(Seat(
+                room_id=room.id,
+                row_label=ts["row_label"],
+                col_number=ts["col_number"],
+                seat_type=ts["seat_type"],
+                width=ts.get("width", 1),
+                is_active=ts.get("is_active", True),
+            ))
+    else:
+        existing_res = await db.execute(select(Seat).where(Seat.room_id == room.id))
+        existing_seats = existing_res.scalars().all()
+        existing_map = {(s.row_label, s.col_number): s for s in existing_seats}
+        seen_keys = set()
+
+        for ts in target_seats:
+            key = (ts["row_label"], ts["col_number"])
+            seen_keys.add(key)
+            if key in existing_map:
+                seat = existing_map[key]
+                seat.seat_type = ts["seat_type"]
+                seat.width = ts.get("width", 1)
+                seat.is_active = ts.get("is_active", True)
+                db.add(seat)
+            else:
+                db.add(Seat(
+                    room_id=room.id,
+                    row_label=ts["row_label"],
+                    col_number=ts["col_number"],
+                    seat_type=ts["seat_type"],
+                    width=ts.get("width", 1),
+                    is_active=ts.get("is_active", True),
+                ))
+
+        for key, seat in existing_map.items():
+            if key not in seen_keys:
+                seat.is_active = False
+                db.add(seat)
 
     await db.flush()
+
+
+async def _generate_seats(db: AsyncSession, room: Room, couple_rows: int = 1) -> None:
+    """Auto-generate realistic cinema seat layout based on room_type safely."""
+    targets = _get_default_target_seats(room)
+    await _sync_room_seats(db, room, targets)
 
 
 from sqlalchemy import select, func as sqla_func
@@ -406,19 +459,18 @@ async def batch_update_room_layout(
         room.total_rows = data.total_rows
         room.total_cols = data.total_cols
 
-        # Delete old seats for this room
-        await db.execute(delete(Seat).where(Seat.room_id == room.id))
-
         if data.custom_seats and len(data.custom_seats) > 0:
-            for s in data.custom_seats:
-                db.add(Seat(
-                    room_id=room.id,
-                    row_label=s.row_label,
-                    col_number=s.col_number,
-                    seat_type=s.seat_type,
-                    width=2 if s.seat_type == SeatType.COUPLE else 1,
-                    is_active=s.is_active,
-                ))
+            targets = [
+                {
+                    "row_label": s.row_label,
+                    "col_number": s.col_number,
+                    "seat_type": s.seat_type,
+                    "width": 2 if s.seat_type == SeatType.COUPLE else 1,
+                    "is_active": s.is_active,
+                }
+                for s in data.custom_seats
+            ]
+            await _sync_room_seats(db, room, targets)
         else:
             await _generate_seats(db, room)
 
@@ -457,7 +509,6 @@ async def update_room_type_layout(
     Regenerates the seat layout accordingly.
     """
     from app.core.exceptions import BadRequestException, ConflictException
-    from sqlalchemy import delete
 
     if data.total_rows < 4 or data.total_rows > 20:
         raise BadRequestException("Số hàng ghế (Rows) phải từ 4 đến 20.")
@@ -494,8 +545,7 @@ async def update_room_type_layout(
         room.total_rows = data.total_rows
         room.total_cols = data.total_cols
 
-        # Delete old seats for this room and regenerate
-        await db.execute(delete(Seat).where(Seat.room_id == room.id))
+        # Safely regenerate layout without cascading deletion
         await _generate_seats(db, room)
         updated_count += 1
 

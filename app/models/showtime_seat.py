@@ -27,7 +27,7 @@ class ShowtimeSeat(Base):
         Integer, ForeignKey("showtimes.id", ondelete="CASCADE"), nullable=False
     )
     seat_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("seats.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey("seats.id", ondelete="RESTRICT"), nullable=False
     )
     status: Mapped[SeatStatus] = mapped_column(
         Enum(SeatStatus), default=SeatStatus.AVAILABLE, nullable=False

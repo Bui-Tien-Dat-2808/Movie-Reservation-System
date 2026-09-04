@@ -166,6 +166,8 @@ class AuthService:
         user.hashed_password = get_password_hash(new_password)
         user.must_change_password = False
         await self.db.flush()
+        if self.cache:
+            await self.cache.invalidate_all_user_tokens(user.id)
         logger.info("User changed password successfully", user_id=user_id)
 
         # FEAT-05: Gửi email cảnh báo bảo mật khi đổi mật khẩu
@@ -218,14 +220,15 @@ class AuthService:
             raise ValidationException("Không tìm thấy tài khoản người dùng tương ứng.")
 
         if verify_password(new_password, user.hashed_password):
-            raise ValidationException("Mật khẩu mới không được trùng với mật khẩu gần nhất của bạn. Vui lòng chọn một mật khẩu khác.")
+            raise ValidationException("Mật khẩu mới không được trùng với mật khẩu cũ trước đây.")
 
         user.hashed_password = get_password_hash(new_password)
         user.must_change_password = False
         await self.db.flush()
 
-        # Invalidate the used token
+        # Delete token and invalidate all previous user sessions
         await self.cache.redis.delete(f"pwd_reset:{token}")
+        await self.cache.invalidate_all_user_tokens(user.id)
         logger.info("password_reset_successfully", user_id=user.id)
 
         # Dispatch security alert

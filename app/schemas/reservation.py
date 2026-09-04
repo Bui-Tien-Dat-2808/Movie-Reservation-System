@@ -36,6 +36,7 @@ class ReservationCreate(BaseModel):
     showtime_id: int
     seat_ids: List[int] = Field(..., min_length=1, max_length=10)
     voucher_code: Optional[str] = None
+    payment_method: Optional[str] = Field("vnpay", description="Phương thức thanh toán: vnpay hoặc cash")
     concessions: Optional[List[ConcessionOrderItem]] = None
     concession_orders: Optional[List[ConcessionOrderItem]] = None
 

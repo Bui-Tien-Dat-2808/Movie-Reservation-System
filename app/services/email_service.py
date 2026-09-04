@@ -239,6 +239,22 @@ class EmailService:
             else ''
         )
 
+        # Determine if this is a pending cash reservation
+        is_cash = pm_code == "cash" or (hasattr(reservation, "notes") and "tiền mặt" in str(reservation.notes or "").lower())
+        is_pending = str(getattr(reservation, "status", "")).lower() in ("pending", "reservationstatus.pending")
+
+        if is_cash and is_pending:
+            header_title = "XÁC NHẬN ĐẶT GIỮ CHỖ THÀNH CÔNG"
+            header_sub = "Đơn giữ chỗ của bạn đã được ghi nhận. Vui lòng thanh toán tiền mặt tại quầy vé CineVerse trước giờ chiếu ít nhất 15 phút để nhận vé."
+            barcode_instruction = "🎟️ Vui lòng xuất trình mã này tại quầy vé CineVerse để thanh toán tiền mặt và nhận vé vào rạp."
+            total_label = "Tổng tiền thanh toán tại quầy:"
+            pm_label = "Tiền mặt (Thanh toán tại quầy rạp chiếu)"
+        else:
+            header_title = "XÁC NHẬN ĐẶT VÉ THÀNH CÔNG"
+            header_sub = "Cảm ơn bạn đã lựa chọn trải nghiệm điện ảnh tại CineVerse!"
+            barcode_instruction = "🎟️ Vui lòng đưa mã này cho nhân viên tại rạp để soát vé vào phòng chiếu."
+            total_label = "Tổng tiền đã thanh toán:"
+
         return f"""
         <!DOCTYPE html>
         <html lang="vi" class="notranslate">
@@ -247,7 +263,7 @@ class EmailService:
             <meta http-equiv="Content-Language" content="vi">
             <meta name="google" content="notranslate">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Xác Nhận Đặt Vé CineVerse</title>
+            <title>{header_title} - CineVerse</title>
         </head>
         <body class="notranslate" style="margin: 0; padding: 0; background-color: #09090e; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f0ede8;">
             <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #09090e; padding: 20px 0;">
@@ -261,8 +277,8 @@ class EmailService:
                                     <div style="display: inline-block; background: #e8b84b; color: #09090e; font-weight: 900; font-size: 18px; padding: 4px 12px; border-radius: 6px; margin-bottom: 8px;">
                                         🎬 CINEVERSE CINEMA
                                     </div>
-                                    <h1 style="margin: 8px 0 0 0; font-size: 22px; font-weight: 800; color: #ffffff;">XÁC NHẬN ĐẶT VÉ THÀNH CÔNG</h1>
-                                    <p style="margin: 4px 0 0 0; font-size: 13px; color: #a09e9a;">Cảm ơn bạn đã lựa chọn trải nghiệm điện ảnh tại CineVerse!</p>
+                                    <h1 style="margin: 8px 0 0 0; font-size: 22px; font-weight: 800; color: #ffffff;">{header_title}</h1>
+                                    <p style="margin: 4px 0 0 0; font-size: 13px; color: #a09e9a;">{header_sub}</p>
                                 </td>
                             </tr>
 
@@ -298,7 +314,7 @@ class EmailService:
                                         <span style="font-family: monospace, sans-serif; font-size: 30px; font-weight: 900; color: #d97706; letter-spacing: 3px; display: block; margin-bottom: 12px;">{ticket_code}</span>
                                         <img src="cid:barcode_img" alt="Barcode Ticket" style="width: 88%; max-width: 360px; height: auto; min-height: 55px; display: block; margin: 0 auto 12px auto;">
                                         <p style="margin: 0; font-size: 12px; color: #e11d48; font-weight: 600;">
-                                            🎟️ Vui lòng đưa mã này cho nhân viên tại rạp để soát vé vào phòng chiếu.
+                                            {barcode_instruction}
                                         </p>
                                     </div>
                                 </td>
@@ -315,7 +331,7 @@ class EmailService:
                                         {concessions_breakdown_html}
                                         {discount_html}
                                         <tr>
-                                            <td style="font-size: 14px; color: #a09e9a; padding-top: 4px;">Tổng tiền đã thanh toán:</td>
+                                            <td style="font-size: 14px; color: #a09e9a; padding-top: 4px;">{total_label}</td>
                                             <td align="right" style="font-size: 20px; font-weight: 900; color: #2ecc71; font-family: monospace; padding-top: 4px;">{total_price_str}</td>
                                         </tr>
                                     </table>
@@ -362,7 +378,11 @@ class EmailService:
         try:
             from_email = settings.SMTP_USER or settings.EMAILS_FROM_EMAIL
             msg = MIMEMultipart("related")
-            msg["Subject"] = f"🎟️ Xác nhận đặt vé thành công! Mã vé {ticket_code} - CineVerse"
+            is_cash_pending = "giữ chỗ" in html_content.lower() or "quầy vé" in html_content.lower()
+            if is_cash_pending:
+                msg["Subject"] = f"🎟️ [CineVerse] Xác nhận đặt giữ chỗ vé xem phim - Mã vé {ticket_code}"
+            else:
+                msg["Subject"] = f"🎟️ [CineVerse] Xác nhận đặt vé thành công! Mã vé {ticket_code}"
             msg["From"] = f"{settings.EMAILS_FROM_NAME} <{from_email}>"
             msg["To"] = user_email
 

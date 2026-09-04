@@ -48,15 +48,22 @@ class CacheService:
             return False
 
     async def delete_pattern(self, pattern: str) -> int:
-        """Delete all keys matching a pattern."""
+        """Delete all keys matching a pattern safely using non-blocking scan_iter."""
         if not self.redis:
             return 0
         try:
-            keys = await self.redis.keys(pattern)
-            if keys:
-                await self.redis.delete(*keys)
-                return len(keys)
-            return 0
+            count = 0
+            batch = []
+            async for key in self.redis.scan_iter(match=pattern, count=100):
+                batch.append(key)
+                if len(batch) >= 100:
+                    await self.redis.delete(*batch)
+                    count += len(batch)
+                    batch = []
+            if batch:
+                await self.redis.delete(*batch)
+                count += len(batch)
+            return count
         except Exception as e:
             logger.warning("Cache delete_pattern failed", pattern=pattern, error=str(e))
             return 0

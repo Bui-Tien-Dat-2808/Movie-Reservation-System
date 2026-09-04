@@ -252,6 +252,11 @@ class TMDBService:
         trailer_url = self._select_best_trailer(vi_videos) or self._select_best_trailer(en_videos) or self._select_best_trailer(videos_list)
 
         # 5. Extract credits (director & top cast)
+        def _has_cjk(text: Optional[str]) -> bool:
+            if not text:
+                return False
+            return any('\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7af' for ch in str(text))
+
         credits_data = data.get("credits", {})
         crew_list = credits_data.get("crew", [])
         directors = [c.get("name") for c in crew_list if isinstance(c, dict) and c.get("job") == "Director"]
@@ -265,6 +270,14 @@ class TMDBService:
                     "character": c.get("character"),
                     "profile_url": self._build_image_url(c.get("profile_path")),
                 })
+
+        # If director or cast contains CJK characters (Kanji/Hanzi/Hangul/Kana), fallback to en-US credits for international names
+        if _has_cjk(director_name) or any(_has_cjk(c.get("name")) for c in cast_list):
+            en_credits = await self.get_movie_credits(data["id"])
+            if en_credits.get("director"):
+                director_name = en_credits["director"]
+            if en_credits.get("cast"):
+                cast_list = en_credits["cast"]
 
         return {
             "tmdb_id": data["id"],

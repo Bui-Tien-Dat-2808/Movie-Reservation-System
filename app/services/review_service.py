@@ -196,10 +196,24 @@ class ReviewService:
                 created_at=now,
                 updated_at=now,
             )
-            self.db.add(review)
+        try:
+            await self.db.commit()
+            await self.db.refresh(review)
+        except Exception:
+            await self.db.rollback()
+            existing_res = await self.db.execute(
+                select(Review).where(Review.user_id == user_id, Review.movie_id == movie_id)
+            )
+            review = existing_res.scalar_one_or_none()
+            if review:
+                review.rating = data.rating
+                review.comment = data.comment
+                review.is_verified_booking = is_verified or review.is_verified_booking
+                review.updated_at = now
+                self.db.add(review)
+                await self.db.commit()
+                await self.db.refresh(review)
 
-        await self.db.commit()
-        await self.db.refresh(review)
         return await self.get_user_review_for_movie(user_id, movie_id)
 
     async def delete_review(self, user_id: int, movie_id: int) -> bool:

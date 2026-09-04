@@ -1,7 +1,7 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -9,6 +9,9 @@ from app.db.base import Base
 
 class Review(Base):
     __tablename__ = "reviews"
+    __table_args__ = (
+        UniqueConstraint("user_id", "movie_id", name="uq_user_movie_review"),
+    )
 
     movie_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("movies.id", ondelete="CASCADE"), nullable=False, index=True

@@ -17,6 +17,7 @@ async def test_generate_couple_seats():
 
     mock_db = MagicMock()
     mock_db.flush = AsyncMock()
+    mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one=lambda: 0))
     room = Room(id=1, name="Test Room", room_type=RoomType.VIP, total_rows=4, total_cols=8)
 
     seats_added = []

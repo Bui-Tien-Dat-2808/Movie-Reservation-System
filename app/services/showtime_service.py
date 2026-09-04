@@ -363,7 +363,16 @@ class ShowtimeService:
                 self.db.add(st_seat)
             await self.db.flush()
             await self.db.commit()
-            showtime = await self.get_showtime(showtime_id)
+            self.db.expire_all()
+
+        # Query showtime seats directly with selectinload to ensure fresh, accurate list
+        st_seats_stmt = (
+            select(ShowtimeSeat)
+            .where(ShowtimeSeat.showtime_id == showtime_id)
+            .options(selectinload(ShowtimeSeat.seat))
+        )
+        st_seats_res = await self.db.execute(st_seats_stmt)
+        all_showtime_seats = list(st_seats_res.scalars().all())
 
         now = datetime.now(timezone.utc)
         seats = []
@@ -371,7 +380,7 @@ class ShowtimeService:
         reserved_count = 0
 
         needs_flush = False
-        for ss in showtime.showtime_seats:
+        for ss in all_showtime_seats:
             if ss.status == SeatStatus.HELD:
                 held_until_aware = (
                     ss.held_until.replace(tzinfo=timezone.utc)

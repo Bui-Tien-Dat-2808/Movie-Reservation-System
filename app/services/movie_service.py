@@ -45,29 +45,31 @@ class MovieService:
     async def auto_update_movie_statuses(self) -> int:
         """
         Update movie statuses based on release date and showtimes.
+        Industry Standard:
+        1. Has upcoming showtimes (start_time >= now and not cancelled) -> NOW_SHOWING
+        2. Release date in future and no showtimes yet -> COMING_SOON
+        3. Past/today release date and NO upcoming showtimes -> ENDED (hidden from Now Showing list)
         Returns the number of movie status changes.
         """
-        from datetime import date, datetime, timedelta, timezone
-        from app.models.showtime import Showtime
+        from datetime import date, datetime, timezone
+        from app.models.showtime import Showtime, ShowtimeStatus
 
         today = date.today()
         now_utc = datetime.now(timezone.utc)
-        cutoff_date = today - timedelta(days=14)
         changes = 0
 
-        # 1. Fetch movie_ids with FUTURE showtimes
+        # 1. Fetch movie_ids with FUTURE, NON-CANCELLED showtimes
         fut_res = await self.db.execute(
-            select(Showtime.movie_id).where(Showtime.start_time >= now_utc).distinct()
+            select(Showtime.movie_id)
+            .where(
+                Showtime.start_time >= now_utc,
+                Showtime.status != ShowtimeStatus.CANCELLED,
+            )
+            .distinct()
         )
         future_showtime_movie_ids = set(fut_res.scalars().all())
 
-        # 2. Fetch movie_ids that HAVE ANY showtimes in the system
-        all_st_res = await self.db.execute(
-            select(Showtime.movie_id).distinct()
-        )
-        has_any_showtime_movie_ids = set(all_st_res.scalars().all())
-
-        # 3. Query all active movies and update status deterministically
+        # 2. Query all active movies and update status deterministically
         res = await self.db.execute(
             select(Movie).where(Movie.is_active == True)
         )
@@ -75,24 +77,17 @@ class MovieService:
 
         for m in movies:
             has_future_st = m.id in future_showtime_movie_ids
-            has_any_st = m.id in has_any_showtime_movie_ids
             old_status = m.status
 
             if has_future_st:
-                # Has scheduled upcoming showtimes -> MUST be NOW_SHOWING
+                # 1. Has scheduled upcoming showtimes -> NOW_SHOWING
                 m.status = MovieStatus.NOW_SHOWING
             elif m.release_date and m.release_date > today:
-                # Release date in future and no future showtimes yet -> COMING_SOON
+                # 2. Release date is in future and no upcoming showtimes yet -> COMING_SOON
                 m.status = MovieStatus.COMING_SOON
-            elif has_any_st and not has_future_st and m.release_date and m.release_date < (today - timedelta(days=30)):
-                # Has past showtimes, no upcoming showtimes, released > 30 days ago -> ENDED
-                m.status = MovieStatus.ENDED
-            elif not has_any_st and m.release_date and m.release_date < (today - timedelta(days=60)):
-                # Never had showtimes and released > 60 days ago -> ENDED
-                m.status = MovieStatus.ENDED
             else:
-                # Within active theatrical window (<= 30 days from release or active) -> NOW_SHOWING
-                m.status = MovieStatus.NOW_SHOWING
+                # 3. Release date is today or past, and has NO upcoming showtimes -> ENDED
+                m.status = MovieStatus.ENDED
 
             if m.status != old_status:
                 changes += 1
