@@ -802,7 +802,7 @@ class ShowtimeService:
             for r in rooms_list
         }
 
-        count = 0
+        valid_showtimes_and_seats = []
         skipped = []
         for item in showtimes_data:
             active_seats = room_seats_map.get(item.room_id, [])
@@ -832,21 +832,27 @@ class ShowtimeService:
                 status=ShowtimeStatus.SCHEDULED,
             )
             self.db.add(st)
+            valid_showtimes_and_seats.append((st, active_seats))
+
+        count = len(valid_showtimes_and_seats)
+        if count > 0:
+            # Single flush for all showtimes so st.id are assigned by DB in one network roundtrip
             await self.db.flush()
 
-            showtime_seats = [
-                ShowtimeSeat(
-                    showtime_id=st.id,
-                    seat_id=seat.id,
-                    status=SeatStatus.AVAILABLE,
-                )
-                for seat in active_seats
-            ]
-            self.db.add_all(showtime_seats)
-            count += 1
+            # Add all showtime seats in memory and persist in batch
+            all_showtime_seats = []
+            for st, active_seats in valid_showtimes_and_seats:
+                for seat in active_seats:
+                    all_showtime_seats.append(
+                        ShowtimeSeat(
+                            showtime_id=st.id,
+                            seat_id=seat.id,
+                            status=SeatStatus.AVAILABLE,
+                        )
+                    )
+            self.db.add_all(all_showtime_seats)
 
-        # Automatically ensure any scheduled movies are active NOW_SHOWING
-        if count > 0:
+            # Automatically ensure any scheduled movies are active NOW_SHOWING
             scheduled_movie_ids = list({item.movie_id for item in showtimes_data})
             if scheduled_movie_ids:
                 m_res = await self.db.execute(
