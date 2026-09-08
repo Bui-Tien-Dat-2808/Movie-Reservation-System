@@ -92,8 +92,9 @@ async def test_refund_service_list_refunds():
     )
 
     mock_db.execute.side_effect = [
-        MagicMock(scalars=lambda: MagicMock(all=lambda: [refund_tx])), # refund_transactions
-        MagicMock(scalars=lambda: MagicMock(all=lambda: [])), # standalone cancelled reservations
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [])),          # untracked backfill check
+        MagicMock(scalar_one=lambda: 1),                               # count query
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [refund_tx])), # paginated refunds
     ]
 
     items, total_count = await service.list_refunds(status_filter=None, payment_method_filter=None)

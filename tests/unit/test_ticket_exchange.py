@@ -46,6 +46,8 @@ async def test_exchange_reservation_deferred_status_until_payment():
 
     # Mock create_reservation for new showtime (PENDING)
     new_res = Reservation(id=6, user_id=42, showtime_id=2, status=ReservationStatus.PENDING, total_price=Decimal("90000"))
+    # Mock create_reservation for new showtime (upgrade to 120,000 VND -> pays 30,000 difference)
+    new_res = Reservation(id=6, user_id=42, showtime_id=2, status=ReservationStatus.PENDING, total_price=Decimal("120000"))
     service.create_reservation = AsyncMock(return_value=new_res)
 
     req = ReservationExchangeRequest(new_showtime_id=2, new_seat_ids=[501])
@@ -53,8 +55,10 @@ async def test_exchange_reservation_deferred_status_until_payment():
     result = await service.exchange_reservation(reservation_id=5, user_id=42, data=req)
 
     # 1. New reservation is created and linked to old reservation
+    # 1. New reservation is created and linked to old reservation, charging only difference
     assert result.id == 6
     assert result.exchanged_from_reservation_id == 5
+    assert result.total_price == Decimal("30000")
     # 2. Old reservation & seats REMAIN CONFIRMED / BOOKED before payment!
     assert old_res.status == ReservationStatus.CONFIRMED
     assert old_ss.status == SeatStatus.BOOKED

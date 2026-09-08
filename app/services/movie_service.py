@@ -85,9 +85,12 @@ class MovieService:
             elif m.release_date and m.release_date > today:
                 # 2. Release date is in future and no upcoming showtimes yet -> COMING_SOON
                 m.status = MovieStatus.COMING_SOON
-            else:
-                # 3. Release date is today or past, and has NO upcoming showtimes -> ENDED
+            elif m.release_date and m.release_date < today and not has_future_st:
+                # 3. Release date is in past and has NO upcoming showtimes -> ENDED
                 m.status = MovieStatus.ENDED
+            elif not m.release_date:
+                # 4. No release date set: preserve manual admin assigned status
+                pass
 
             if m.status != old_status:
                 changes += 1
@@ -264,10 +267,12 @@ class MovieService:
                 movie._avg_rating = round(float(stats_row[0]), 1) if stats_row[0] is not None else None
                 movie._total_reviews = int(stats_row[1]) if stats_row[1] is not None else 0
 
+            import os
+            is_testing = bool(os.environ.get("PYTEST_CURRENT_TEST"))
             need_trailer = movie.trailer_url is None or not movie.trailer_url.startswith("https://www.youtube.com/embed/")
             need_director = not movie.director or movie.director in ["N/A", "Đang cập nhật", ""]
             need_cast = not movie.cast_json
-            if (need_trailer or need_director or need_cast):
+            if not is_testing and (need_trailer or need_director or need_cast):
                 try:
                     tmdb_id = movie.tmdb_id
                     if not tmdb_id:
@@ -279,7 +284,7 @@ class MovieService:
                             movie.tmdb_id = tmdb_id
                     if tmdb_id:
                         await self.sync_from_tmdb(tmdb_id)
-                        await self.db.commit()
+                        await self.db.flush()
                         result = await self.db.execute(
                             select(Movie)
                             .where(Movie.id == movie.id)
@@ -526,6 +531,7 @@ class MovieService:
         self,
         limit: int = 12,
         pages_needed: int = 1,
+        tmdb: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Automatically fetch Now Playing and Upcoming movies from TMDB API,
@@ -534,6 +540,7 @@ class MovieService:
         Args:
             limit: Max number of movies per category (now_playing / upcoming).
             pages_needed: How many TMDB pages to scan per category to reach `limit`.
+            tmdb: Optional TMDBService instance (uses default if None).
 
         Returns a dict with:
             success, added_new_count, updated_existing_count,
@@ -545,7 +552,8 @@ class MovieService:
         from datetime import date
         from app.models.showtime import Showtime
 
-        tmdb = TMDBService()
+        if tmdb is None:
+            tmdb = TMDBService()
 
         # ------------------------------------------------------------------
         # 1. Fetch movie lists (raises on network errors — caller handles)

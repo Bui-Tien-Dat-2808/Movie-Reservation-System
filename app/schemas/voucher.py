@@ -17,6 +17,9 @@ class VoucherBase(BaseModel):
     max_uses_total: Optional[int] = Field(None, ge=1)
     max_uses_per_user: Optional[int] = Field(None, ge=1)
     min_loyalty_tier: Optional[str] = None
+    applicable_scope: Optional[str] = "all"
+    target_room_type: Optional[str] = None
+    target_category: Optional[str] = None
     is_active: bool = True
 
 
@@ -36,6 +39,9 @@ class VoucherUpdate(BaseModel):
     max_uses_total: Optional[int] = Field(None, ge=1)
     max_uses_per_user: Optional[int] = Field(None, ge=1)
     min_loyalty_tier: Optional[str] = None
+    applicable_scope: Optional[str] = None
+    target_room_type: Optional[str] = None
+    target_category: Optional[str] = None
     is_active: Optional[bool] = None
 
 

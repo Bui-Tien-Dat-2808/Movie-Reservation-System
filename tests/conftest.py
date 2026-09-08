@@ -53,6 +53,8 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 
     mock_redis = AsyncMock()
 
+    zset_store = {}
+
     async def mock_get(key: str):
         return redis_store.get(key)
 
@@ -66,16 +68,71 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
             if k in redis_store:
                 del redis_store[k]
                 count += 1
+            if k in zset_store:
+                del zset_store[k]
+                count += 1
         return count
 
     async def mock_keys(pattern: str):
         import fnmatch
         return [k for k in redis_store.keys() if fnmatch.fnmatch(k, pattern)]
 
+    async def mock_zcard(key: str):
+        return len(zset_store.get(key, {}))
+
+    async def mock_zadd(key: str, mapping: dict):
+        if key not in zset_store:
+            zset_store[key] = {}
+        for m, s in mapping.items():
+            zset_store[key][m] = s
+        return len(mapping)
+
+    async def mock_zscore(key: str, member: str):
+        return zset_store.get(key, {}).get(member)
+
+    async def mock_zremrangebyscore(key: str, min_s: float, max_s: float):
+        if key not in zset_store:
+            return 0
+        rem = [m for m, s in zset_store[key].items() if min_s <= s <= max_s]
+        for m in rem:
+            del zset_store[key][m]
+        return len(rem)
+
+    async def mock_zrank(key: str, member: str):
+        if key not in zset_store or member not in zset_store[key]:
+            return None
+        sorted_members = sorted(zset_store[key].items(), key=lambda x: x[1])
+        for idx, (m, _) in enumerate(sorted_members):
+            if m == member:
+                return idx
+        return None
+
+    async def mock_incr(key: str):
+        val = int(redis_store.get(key, 0)) + 1
+        redis_store[key] = str(val)
+        return val
+
+    async def mock_expire(key: str, seconds: int):
+        return True
+
+    async def mock_scan_iter(match: str = "*", count: int = 100):
+        import fnmatch
+        for k in list(redis_store.keys()) + list(zset_store.keys()):
+            if fnmatch.fnmatch(k, match):
+                yield k
+
     mock_redis.get.side_effect = mock_get
     mock_redis.setex.side_effect = mock_setex
     mock_redis.delete.side_effect = mock_delete
     mock_redis.keys.side_effect = mock_keys
+    mock_redis.scan_iter = mock_scan_iter
+    mock_redis.zcard.side_effect = mock_zcard
+    mock_redis.zadd.side_effect = mock_zadd
+    mock_redis.zscore.side_effect = mock_zscore
+    mock_redis.zremrangebyscore.side_effect = mock_zremrangebyscore
+    mock_redis.zrank.side_effect = mock_zrank
+    mock_redis.incr.side_effect = mock_incr
+    mock_redis.expire.side_effect = mock_expire
 
     async def override_get_db():
         yield db_session

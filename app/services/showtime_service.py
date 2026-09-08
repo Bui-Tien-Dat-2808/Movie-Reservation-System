@@ -190,17 +190,23 @@ class ShowtimeService:
             raise NotFoundException("Room", data.room_id)
 
         # Check for time conflicts in same room
+        # Check for time conflicts in same room (including 15-minute cleaning buffer)
+        from datetime import timedelta
+        cleaning_buffer = timedelta(minutes=15)
         conflict = await self.db.execute(
             select(Showtime).where(
                 Showtime.room_id == data.room_id,
                 Showtime.status != ShowtimeStatus.CANCELLED,
                 Showtime.start_time < data.end_time,
                 Showtime.end_time > data.start_time,
+                Showtime.start_time < (data.end_time + cleaning_buffer),
+                Showtime.end_time > (data.start_time - cleaning_buffer),
             )
         )
         if conflict.scalar_one_or_none():
             raise ConflictException(
                 "Room already has a showtime scheduled during this time slot"
+                "Phòng chiếu đã có lịch chiếu trong khung giờ này (hoặc vi phạm khoảng cách tối thiểu 15 phút dọn phòng giữa 2 suất chiếu)."
             )
 
         # Create showtime
@@ -247,6 +253,8 @@ class ShowtimeService:
             if check_start < now_utc:
                 raise ValidationException("Cannot move a showtime's start_time into the past")
 
+            from datetime import timedelta
+            cleaning_buffer = timedelta(minutes=15)
             conflict = await self.db.execute(
                 select(Showtime).where(
                     Showtime.room_id == showtime.room_id,
@@ -254,10 +262,13 @@ class ShowtimeService:
                     Showtime.status != ShowtimeStatus.CANCELLED,
                     Showtime.start_time < new_end,
                     Showtime.end_time > new_start,
+                    Showtime.start_time < (new_end + cleaning_buffer),
+                    Showtime.end_time > (new_start - cleaning_buffer),
                 )
             )
             if conflict.scalar_one_or_none():
                 raise ConflictException("Room already has a showtime scheduled during this time slot")
+                raise ConflictException("Phòng chiếu đã có lịch chiếu trong khung giờ này (hoặc vi phạm khoảng cách tối thiểu 15 phút dọn phòng giữa 2 suất chiếu).")
 
         for field, value in update_data.items():
             if value is None and field in {"start_time", "end_time", "base_price", "status"}:
@@ -276,6 +287,7 @@ class ShowtimeService:
         showtime.status = ShowtimeStatus.CANCELLED
 
         # Cancel any active reservations for this showtime
+        # Cancel any active reservations for this showtime and release seats
         res_stmt = select(Reservation).where(
             Reservation.showtime_id == showtime_id,
             Reservation.status.in_([ReservationStatus.PENDING, ReservationStatus.CONFIRMED]),
@@ -283,6 +295,19 @@ class ShowtimeService:
         res_objs = (await self.db.execute(res_stmt)).scalars().all()
         for r in res_objs:
             r.status = ReservationStatus.CANCELLED
+            if not r.notes:
+                r.notes = "Suất chiếu bị hủy bởi ban quản lý rạp"
+            elif "Suất chiếu bị hủy" not in r.notes:
+                r.notes = f"{r.notes} | Suất chiếu bị hủy bởi ban quản lý rạp"
+            self.db.add(r)
+
+        # Free all showtime seats
+        from sqlalchemy import update
+        await self.db.execute(
+            update(ShowtimeSeat)
+            .where(ShowtimeSeat.showtime_id == showtime_id)
+            .values(status=SeatStatus.AVAILABLE, held_by=None, held_until=None)
+        )
 
         await self.db.flush()
         await self.cache.delete_pattern("showtimes:*")
@@ -347,13 +372,17 @@ class ShowtimeService:
         showtime = await self.get_showtime(showtime_id)
 
         # Auto-heal: If showtime has no showtime_seats generated or desynced from room layout
+        # Auto-heal safely: If showtime has no showtime_seats or is missing seats from active room layout
         active_room_seats = [s for s in (showtime.room.seats or []) if s.is_active] if showtime.room else []
         has_orphaned = any(ss.seat is None for ss in (showtime.showtime_seats or []))
         is_mismatched = len(showtime.showtime_seats or []) != len(active_room_seats)
+        existing_showtime_seats = list(showtime.showtime_seats or [])
+        existing_seat_ids = {ss.seat_id for ss in existing_showtime_seats if ss.seat_id is not None}
 
         if (not showtime.showtime_seats or has_orphaned or is_mismatched) and active_room_seats:
             from sqlalchemy import delete
             await self.db.execute(delete(ShowtimeSeat).where(ShowtimeSeat.showtime_id == showtime.id))
+        if not existing_showtime_seats and active_room_seats:
             for seat in active_room_seats:
                 st_seat = ShowtimeSeat(
                     showtime_id=showtime.id,
@@ -364,6 +393,20 @@ class ShowtimeService:
             await self.db.flush()
             await self.db.commit()
             self.db.expire_all()
+        elif active_room_seats:
+            # Safely append missing seats only — NEVER delete existing seats (prevents deleting confirmed customer tickets!)
+            missing_seats = [seat for seat in active_room_seats if seat.id not in existing_seat_ids]
+            if missing_seats:
+                for seat in missing_seats:
+                    st_seat = ShowtimeSeat(
+                        showtime_id=showtime.id,
+                        seat_id=seat.id,
+                        status=SeatStatus.AVAILABLE,
+                    )
+                    self.db.add(st_seat)
+                await self.db.flush()
+                await self.db.commit()
+                self.db.expire_all()
 
         # Query showtime seats directly with selectinload to ensure fresh, accurate list
         st_seats_stmt = (

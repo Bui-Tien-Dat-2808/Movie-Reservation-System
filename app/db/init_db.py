@@ -45,6 +45,15 @@ async def _migrate_schema() -> None:
             await db.execute(
                 text("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS min_loyalty_tier VARCHAR(20);")
             )
+            await db.execute(
+                text("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS applicable_scope VARCHAR(30) DEFAULT 'all';")
+            )
+            await db.execute(
+                text("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS target_room_type VARCHAR(30);")
+            )
+            await db.execute(
+                text("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS target_category VARCHAR(30);")
+            )
             await db.commit()
         except Exception:
             await db.rollback()

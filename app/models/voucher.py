@@ -28,6 +28,9 @@ class Voucher(Base):
     max_uses_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_uses_per_user: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     min_loyalty_tier: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # e.g. "bronze", "silver", "gold", "diamond"
+    applicable_scope: Mapped[str] = mapped_column(String(30), default="all", nullable=False)  # "all", "tickets", "rooms", "concessions", "loyalty"
+    target_room_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # "VIP", "IMAX", "3D", "STANDARD"
+    target_category: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # "combo", "popcorn", "drink"
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Relationships

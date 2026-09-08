@@ -282,10 +282,64 @@ class RefundService:
         page_size: int = 20,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """List refund transactions and cancelled reservations for admin view with pagination."""
-        query = select(RefundTransaction).options(
-            selectinload(RefundTransaction.payment_transaction),
-            selectinload(RefundTransaction.reservation).selectinload(Reservation.user),
-            selectinload(RefundTransaction.reservation).selectinload(Reservation.showtime).selectinload(Showtime.movie),
+        # 1. Backfill any cancelled reservations lacking a RefundTransaction record
+        from app.models.reservation import ReservationStatus
+        untracked = await self.db.execute(
+            select(Reservation)
+            .where(
+                Reservation.status == ReservationStatus.CANCELLED,
+                ~Reservation.id.in_(select(RefundTransaction.reservation_id).where(RefundTransaction.reservation_id.isnot(None)))
+            )
+        )
+        untracked_list = untracked.scalars().all()
+        if untracked_list:
+            for un_res in untracked_list:
+                rf_hash = hashlib.md5(f"CASH_{un_res.id}".encode()).hexdigest()[:14]
+                self.db.add(RefundTransaction(
+                    reservation_id=un_res.id,
+                    amount=un_res.total_price or Decimal("0"),
+                    status="success",
+                    vnp_request_id=f"RF{rf_hash}",
+                    vnpay_response_message="Vé hủy tiền mặt / đổi vé",
+                    admin_note=un_res.notes or "Đã hủy vé",
+                    created_at=un_res.created_at or datetime.now(timezone.utc),
+                ))
+            await self.db.flush()
+
+        # 2. Build filtered SQL query
+        base_query = select(RefundTransaction)
+        if status_filter and status_filter != "all":
+            base_query = base_query.where(RefundTransaction.status == status_filter)
+
+        if start_date and start_date.strip():
+            try:
+                s_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                base_query = base_query.where(RefundTransaction.created_at >= s_dt)
+            except Exception as e:
+                logger.warning("invalid_start_date_filter", start_date=start_date, error=str(e))
+
+        if end_date and end_date.strip():
+            try:
+                e_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+                base_query = base_query.where(RefundTransaction.created_at <= e_dt)
+            except Exception as e:
+                logger.warning("invalid_end_date_filter", end_date=end_date, error=str(e))
+
+        # Count total matching rows
+        total_stmt = select(func.count()).select_from(base_query.subquery())
+        total = (await self.db.execute(total_stmt)).scalar_one()
+
+        # Query paginated rows with relationships
+        query = (
+            base_query
+            .options(
+                selectinload(RefundTransaction.payment_transaction),
+                selectinload(RefundTransaction.reservation).selectinload(Reservation.user),
+                selectinload(RefundTransaction.reservation).selectinload(Reservation.showtime).selectinload(Showtime.movie),
+            )
+            .order_by(RefundTransaction.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         )
 
         res = await self.db.execute(query)
@@ -316,6 +370,7 @@ class RefundService:
                         return reason
             return "Tôi không còn nhu cầu xem phim nữa"
 
+        items = []
         for r in refunds:
             if r.reservation_id:
                 existing_res_ids.add(r.reservation_id)
@@ -362,92 +417,4 @@ class RefundService:
                 "cancellation_reason": cancellation_reason,
             })
 
-        # Include standalone Cancelled Reservations without a RefundTransaction record
-        from app.models.reservation import ReservationStatus
-        cancelled_res_query = (
-            select(Reservation)
-            .where(Reservation.status == ReservationStatus.CANCELLED)
-            .options(
-                selectinload(Reservation.user),
-                selectinload(Reservation.showtime).selectinload(Showtime.movie),
-                selectinload(Reservation.payment_transactions),
-            )
-        )
-        cancelled_res = (await self.db.execute(cancelled_res_query)).scalars().all()
-
-        for res_obj in cancelled_res:
-            if res_obj.id in existing_res_ids:
-                continue
-
-            user = res_obj.user
-            showtime = res_obj.showtime
-            movie_title = showtime.movie.title if showtime and getattr(showtime, "movie", None) else None
-
-            pm = "cash"
-            if res_obj.payment_transactions:
-                for pt in res_obj.payment_transactions:
-                    if pt.payment_method:
-                        pm = pt.payment_method
-                        break
-            elif getattr(res_obj, "payment_method", None):
-                pm = res_obj.payment_method
-
-            cancellation_reason = _extract_reason(res_obj.notes, None, None)
-            cash_rf_code = f"RF{hashlib.md5(f'CASH_{res_obj.id}'.encode()).hexdigest()[:14]}"
-
-            items.append({
-                "id": 9000000 + res_obj.id,
-                "reservation_id": res_obj.id,
-                "payment_transaction_id": 0,
-                "amount": res_obj.total_price,
-                "vnp_request_id": cash_rf_code,
-                "status": "success",
-                "vnpay_response_code": "00",
-                "vnpay_response_message": "Thanh toán tiền mặt tại rạp",
-                "admin_note": f"Lý do hủy: {cancellation_reason}",
-                "resolved_by_admin_id": None,
-                "resolved_at": res_obj.created_at,
-                "created_at": res_obj.created_at,
-                "ticket_code": res_obj.ticket_code or f"CVN-{res_obj.id}",
-                "user_email": user.email if user else None,
-                "user_full_name": user.full_name if user else None,
-                "movie_title": movie_title,
-                "payment_method": pm,
-                "cancellation_reason": cancellation_reason,
-            })
-
-        # Apply filtering by status & payment_method
-        if status_filter and status_filter != "all":
-            items = [item for item in items if item["status"] == status_filter]
-
-        if payment_method_filter and payment_method_filter != "all":
-            items = [item for item in items if item["payment_method"] == payment_method_filter]
-
-        # Apply date range filtering (start_date & end_date YYYY-MM-DD)
-        if start_date and start_date.strip():
-            try:
-                s_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                items = [
-                    item for item in items
-                    if (item["created_at"].astimezone(timezone.utc) if hasattr(item["created_at"], "astimezone") else item["created_at"]) >= s_dt
-                ]
-            except Exception as e:
-                logger.warning("invalid_start_date_filter", start_date=start_date, error=str(e))
-
-        if end_date and end_date.strip():
-            try:
-                e_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
-                items = [
-                    item for item in items
-                    if (item["created_at"].astimezone(timezone.utc) if hasattr(item["created_at"], "astimezone") else item["created_at"]) <= e_dt
-                ]
-            except Exception as e:
-                logger.warning("invalid_end_date_filter", end_date=end_date, error=str(e))
-
-        # Sort by created_at descending
-        items.sort(key=lambda x: x["created_at"], reverse=True)
-
-        total = len(items)
-        paginated_items = items[(page - 1) * page_size : page * page_size]
-
-        return paginated_items, total
+        return items, total

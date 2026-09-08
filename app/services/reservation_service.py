@@ -207,9 +207,26 @@ class ReservationService:
                     self.db.add(old_st_seat)
 
         # Determine payment method
+        # Determine payment method & role permissions
+        from app.models.user import User, UserRole
+        user_res = await self.db.execute(select(User).where(User.id == user_id))
+        user_obj = user_res.scalar_one_or_none()
+        is_staff_or_admin = user_obj and user_obj.role in (UserRole.ADMIN, UserRole.STAFF)
+
         req_pm = (getattr(data, "payment_method", "vnpay") or "vnpay").lower()
         res_notes = "Thanh toán tiền mặt tại quầy" if req_pm == "cash" else None
         res_status = ReservationStatus.CONFIRMED if req_pm == "cash" else ReservationStatus.PENDING
+        is_auto_confirmed_cash = (req_pm == "cash" and is_staff_or_admin)
+
+        if is_auto_confirmed_cash:
+            res_notes = "Thanh toán tiền mặt tại quầy (Xác nhận bởi nhân viên)"
+            res_status = ReservationStatus.CONFIRMED
+        elif req_pm == "cash":
+            res_notes = "Chờ thanh toán tiền mặt tại quầy vé rạp"
+            res_status = ReservationStatus.PENDING
+        else:
+            res_notes = None
+            res_status = ReservationStatus.PENDING
 
         # Create reservation
         reservation = Reservation(
@@ -224,8 +241,8 @@ class ReservationService:
         self.db.add(reservation)
         await self.db.flush()
 
-        # Record cash payment transaction if payment_method is cash
-        if req_pm == "cash":
+        # Record cash payment transaction ONLY if confirmed by staff/admin
+        if is_auto_confirmed_cash:
             from app.models.payment import PaymentTransaction
             cash_tx = PaymentTransaction(
                 reservation_id=reservation.id,
@@ -254,10 +271,10 @@ class ReservationService:
                 reservation_id=reservation.id,
             )
 
-        # Update showtime seats: BOOKED if cash, HELD for 15 mins if online gateway
+        # Update showtime seats: BOOKED if confirmed cash, HELD for 15 mins if online/pending
         pay_held_until = now + timedelta(minutes=15)
         for ss in locked_seats:
-            if req_pm == "cash":
+            if is_auto_confirmed_cash:
                 ss.status = SeatStatus.BOOKED
                 ss.held_by = None
                 ss.held_until = None
@@ -311,8 +328,8 @@ class ReservationService:
         # Invalidate seat cache
         await self.cache.delete_pattern(f"showtimes:seats:{data.showtime_id}")
 
-        # Dispatch Confirmation Email, award points & broadcast for Cash Booking
-        if req_pm == "cash":
+        # Dispatch Confirmation Email, award points & broadcast for Confirmed Cash Booking
+        if is_auto_confirmed_cash:
             # Award loyalty points for confirmed cash booking
             try:
                 from app.services.loyalty_service import LoyaltyService
@@ -605,25 +622,74 @@ class ReservationService:
                 f"Vé chỉ có thể đổi sang suất khác trước giờ chiếu tối thiểu {min_mins} phút."
             )
 
-        # Create new reservation (PENDING)
+        # Create new reservation without re-validating the old voucher to avoid single-use voucher conflict
         from app.schemas.reservation import ReservationCreate
         new_res_create = ReservationCreate(
             showtime_id=data.new_showtime_id,
             seat_ids=data.new_seat_ids,
-            voucher_code=old_reservation.voucher_code,
+            voucher_code=None,
         )
 
         new_reservation = await self.create_reservation(user_id=user_id, data=new_res_create)
 
-        # Record link to old reservation — old reservation stays CONFIRMED until new reservation payment succeeds
+        # Calculate price difference: customer is credited the full net amount already paid
+        old_paid_amount = old_reservation.total_price or Decimal("0")
+        new_raw_total = new_reservation.total_price or Decimal("0")
+        price_difference = max(Decimal("0"), new_raw_total - old_paid_amount)
+
+        # Link to old reservation
         new_reservation.exchanged_from_reservation_id = old_reservation.id
+
+        if price_difference == Decimal("0"):
+            # Same price or cheaper: no extra payment needed, finalize exchange immediately!
+            new_reservation.total_price = Decimal("0")
+            new_reservation.discount_amount = new_raw_total
+            new_reservation.status = ReservationStatus.CONFIRMED
+            new_reservation.notes = f"Đổi từ vé #{old_reservation.ticket_code or old_reservation.id} (Đã khấu trừ toàn bộ giá vé cũ {int(old_paid_amount):,}đ)"
+
+            # Release old seats immediately
+            for rs in (old_reservation.reservation_seats or []):
+                st_seat_res = await self.db.execute(select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id))
+                ss = st_seat_res.scalar_one_or_none()
+                if ss:
+                    ss.status = SeatStatus.AVAILABLE
+                    ss.held_by = None
+                    ss.held_until = None
+                    self.db.add(ss)
+
+            old_reservation.status = ReservationStatus.EXCHANGED
+            old_reservation.notes = f"Đã đổi sang đơn vé #{new_reservation.ticket_code or new_reservation.id}"
+            self.db.add(old_reservation)
+
+            # Mark new seats as BOOKED
+            for rs in (new_reservation.reservation_seats or []):
+                st_seat_res = await self.db.execute(select(ShowtimeSeat).where(ShowtimeSeat.id == rs.showtime_seat_id))
+                ss = st_seat_res.scalar_one_or_none()
+                if ss:
+                    ss.status = SeatStatus.BOOKED
+                    ss.held_by = None
+                    ss.held_until = None
+                    self.db.add(ss)
+
+            await self.cache.delete_pattern(f"showtimes:seats:{old_reservation.showtime_id}")
+            await self.cache.delete_pattern(f"showtimes:seats:{new_reservation.showtime_id}")
+        else:
+            # Upgrade / more expensive: user only pays the difference
+            new_reservation.total_price = price_difference
+            new_reservation.discount_amount = old_paid_amount
+            new_reservation.status = ReservationStatus.PENDING
+            new_reservation.notes = f"Đổi từ vé #{old_reservation.ticket_code or old_reservation.id} (Thanh toán phụ thu chênh lệch: {int(price_difference):,}đ)"
+
         self.db.add(new_reservation)
         await self.db.flush()
+        await self.db.commit()
+        await self.db.refresh(new_reservation)
 
         logger.info(
-            "Reservation exchange initiated",
+            "Reservation exchange processed",
             old_reservation_id=reservation_id,
             new_reservation_id=new_reservation.id,
+            difference=float(price_difference),
             user_id=user_id,
         )
         return new_reservation
@@ -929,7 +995,17 @@ class ReservationService:
         and log PaymentTransaction.
         """
         vnp_params = vnp_params or {}
-        reservation = await self.get_reservation(reservation_id)
+        # Concurrency safety: Row-level lock on Reservation prevents duplicate processing between IPN & Return callback
+        res_stmt = (
+            select(Reservation)
+            .where(Reservation.id == reservation_id)
+            .with_for_update()
+        )
+        res_result = await self.db.execute(res_stmt)
+        reservation = res_result.scalar_one_or_none()
+        if not reservation:
+            from app.core.exceptions import NotFoundException
+            raise NotFoundException("Reservation", reservation_id)
 
         if reservation.status == ReservationStatus.CONFIRMED:
             return reservation  # Already confirmed (e.g., IPN vs Return callback race)

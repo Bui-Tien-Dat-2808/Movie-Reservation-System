@@ -233,7 +233,7 @@ async def auto_sync_tmdb(
 
     # Delegate all sync logic to service layer; only handle HTTP-level errors here
     try:
-        return await service.perform_auto_tmdb_sync(limit=limit, pages_needed=pages_needed)
+        return await service.perform_auto_tmdb_sync(limit=limit, pages_needed=pages_needed, tmdb=tmdb)
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
         logger.error("TMDB API HTTP error during auto-sync", status_code=status_code, response=e.response.text)

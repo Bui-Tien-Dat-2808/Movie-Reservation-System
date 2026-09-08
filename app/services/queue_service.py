@@ -197,8 +197,10 @@ class QueueService:
 
         now = time.time()
         await self.redis.zremrangebyscore(active_key, 0, now)
-        active_count = await self.redis.zcard(active_key)
-        waiting_count = await self.redis.zcard(waiting_key)
+        active_raw = await self.redis.zcard(active_key)
+        waiting_raw = await self.redis.zcard(waiting_key)
+        active_count = int(active_raw) if isinstance(active_raw, (int, float, str)) and str(active_raw).isdigit() else (active_raw if isinstance(active_raw, int) else 0)
+        waiting_count = int(waiting_raw) if isinstance(waiting_raw, (int, float, str)) and str(waiting_raw).isdigit() else (waiting_raw if isinstance(waiting_raw, int) else 0)
 
         if active_count < self.max_active and waiting_count == 0:
             await self._issue_pass_token(showtime_id, user_id)
