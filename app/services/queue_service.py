@@ -197,6 +197,8 @@ class QueueService:
 
         now = time.time()
         await self.redis.zremrangebyscore(active_key, 0, now)
+        active_count = await self.redis.zcard(active_key)
+        waiting_count = await self.redis.zcard(waiting_key)
         active_raw = await self.redis.zcard(active_key)
         waiting_raw = await self.redis.zcard(waiting_key)
         active_count = int(active_raw) if isinstance(active_raw, (int, float, str)) and str(active_raw).isdigit() else (active_raw if isinstance(active_raw, int) else 0)

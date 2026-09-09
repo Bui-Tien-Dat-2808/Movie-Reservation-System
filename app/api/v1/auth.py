@@ -70,6 +70,12 @@ async def register(
     redis=Depends(get_redis),
 ):
     """Register a new user account with rate limiting."""
+    # Verify CAPTCHA first
+    if not data.captcha_id or not data.captcha_answer or not await CaptchaService.verify(data.captcha_id, data.captcha_answer):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không đúng hoặc đã hết hạn, vui lòng thử lại.",
+        )
     # Verify CAPTCHA first (cho phép bỏ qua khi chạy pytest kiểm thử tự động)
     import os
     is_testing = bool(os.environ.get("PYTEST_CURRENT_TEST"))
@@ -101,6 +107,12 @@ async def login(
     - **access_token**: short-lived JWT (30 min)
     - **refresh_token**: long-lived token (7 days)
     """
+    # Verify CAPTCHA first
+    if not data.captcha_id or not data.captcha_answer or not await CaptchaService.verify(data.captcha_id, data.captcha_answer):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực không đúng hoặc đã hết hạn, vui lòng thử lại.",
+        )
     # Verify CAPTCHA first (cho phép bỏ qua khi chạy pytest kiểm thử tự động)
     import os
     is_testing = bool(os.environ.get("PYTEST_CURRENT_TEST"))

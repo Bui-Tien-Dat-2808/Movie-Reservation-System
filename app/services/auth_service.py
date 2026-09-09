@@ -47,6 +47,8 @@ class AuthService:
                 raise ConflictException(f"Số điện thoại '{data.phone_number}' đã được đăng ký")
 
         # Verify Cloudflare Turnstile token if provided
+        if data.turnstile_token:
+            valid_turnstile = await self.verify_turnstile(data.turnstile_token)
         turnstile_tok = getattr(data, "turnstile_token", None)
         if turnstile_tok:
             valid_turnstile = await self.verify_turnstile(turnstile_tok)
